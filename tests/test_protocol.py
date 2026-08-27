@@ -108,3 +108,125 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded[0].right == obs[0].right
     assert loaded[0].repeat == obs[0].repeat
     assert loaded[0].verdict == "TIE"
+
+
+# ----------------------------------------------------------------------------
+# Reasoning audit metadata
+# ----------------------------------------------------------------------------
+
+def test_judge_can_return_verdict_and_reasoning():
+    """A judge_fn that returns (verdict, reasoning) stores both."""
+    def judge(left, right):
+        return ("LEFT", f"because {left} feels more native than {right}")
+
+    obs = run_tournament(["a", "b", "c"], judge, repeats=2)
+    assert len(obs) == 12  # 3 pairs * 2 orientations * 2 repeats
+    assert all(o.reasoning for o in obs), "every observation should have non-empty reasoning"
+    assert all(o.verdict == "LEFT" for o in obs)
+    # Reasoning text refers to the actual pair.
+    sample = obs[0]
+    assert sample.left in sample.reasoning
+    assert sample.right in sample.reasoning
+
+
+def test_judge_can_still_return_just_verdict():
+    """The simple str return shape is unchanged."""
+    def judge(left, right):
+        return "RIGHT"
+
+    obs = run_tournament(["a", "b"], judge, repeats=2)
+    assert all(o.verdict == "RIGHT" for o in obs)
+    assert all(o.reasoning == "" for o in obs), "missing reasoning defaults to empty string"
+
+
+def test_judge_returning_three_tuple_raises():
+    """Only str or (str, str) are accepted from judge_fn."""
+    def judge(left, right):
+        return ("LEFT", "reasoning", "extra")
+    with pytest.raises(ValueError):
+        run_tournament(["a", "b"], judge, repeats=1)
+
+
+def test_reasoning_survives_save_load(tmp_path):
+    """Reasoning round-trips through JSONL."""
+    obs = [Observation(
+        a="a", b="b", left="a", right="b", repeat=1,
+        verdict="TIE", reasoning="a multi-line\nreasoning trace\nwith details",
+    )]
+    p = tmp_path / "obs.jsonl"
+    save_observations_jsonl(p, obs)
+    loaded = load_observations_jsonl(p)
+    assert loaded[0].reasoning == obs[0].reasoning
+
+
+def test_load_backfills_missing_reasoning_with_default(tmp_path):
+    """Rows written before the reasoning field was added still load."""
+    p = tmp_path / "obs.jsonl"
+    # Hand-write a row that omits the reasoning key, simulating old data.
+    p.write_text(
+        '{"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, "verdict": "TIE"}\n'
+    )
+    loaded = load_observations_jsonl(p)
+    assert len(loaded) == 1
+    assert loaded[0].reasoning == ""
+
+
+def test_load_ignores_unknown_keys(tmp_path):
+    """Forward compatibility: a row with an extra unknown key still loads."""
+    p = tmp_path / "obs.jsonl"
+    p.write_text(
+        '{"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, '
+        '"verdict": "TIE", "reasoning": "ok", "future_field": 42}\n'
+    )
+    loaded = load_observations_jsonl(p)
+    assert len(loaded) == 1
+    assert loaded[0].reasoning == "ok"
+
+
+def test_reasoning_does_not_affect_dedup():
+    """Two obs with the same key but different reasoning collapse to one;
+    the existing row's reasoning is preserved verbatim."""
+    existing = [Observation(
+        a="a", b="b", left="a", right="b", repeat=1,
+        verdict="TIE", reasoning="first-pass reasoning",
+    )]
+
+    def judge(left, right):
+        return ("LEFT", "second-pass reasoning")
+
+    out = run_tournament(["a", "b"], judge, repeats=1, existing=existing)
+    matches = [o for o in out if observation_key(o) == ("a", "b", "a", "b", 1)]
+    assert len(matches) == 1, "dedup must collapse on (a,b,left,right,repeat)"
+    assert matches[0].reasoning == "first-pass reasoning", (
+        "existing reasoning is preserved, not overwritten"
+    )
+
+
+def test_reasoning_does_not_affect_dedup_key():
+    """The observation_key function never reads reasoning."""
+    o1 = Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="TIE", reasoning="x")
+    o2 = Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="TIE", reasoning="y")
+    assert observation_key(o1) == observation_key(o2)
+
+
+def test_reasoning_does_not_affect_fit(tmp_path):
+    """The ranking model never reads reasoning. Fitting observations with
+    and without reasoning on the same verdicts must produce the same
+    posterior draws (deterministic given the same seed)."""
+    import numpy as np
+    from pairwise_rank import fit
+
+    base = [Observation(
+        a="a", b="b", left="a", right="b", repeat=r, verdict="RIGHT",
+    ) for r in range(1, 7)]
+    with_reasoning = [
+        Observation(**{**o.__dict__, "reasoning": f"trace for repeat {o.repeat}"})
+        for o in base
+    ]
+
+    r1 = fit(base, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
+    r2 = fit(with_reasoning, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
+    np.testing.assert_allclose(r1.theta_draws, r2.theta_draws, atol=1e-6)
+    np.testing.assert_allclose(r1.beta_right_draws, r2.beta_right_draws, atol=1e-6)
+    np.testing.assert_allclose(r1.cutpoint_draws, r2.cutpoint_draws, atol=1e-6)
+    np.testing.assert_allclose(r1.sigma_theta_draws, r2.sigma_theta_draws, atol=1e-6)

@@ -73,15 +73,38 @@ Changing the instruction can change the ranking because it changes the
 evaluation construct. Reproducible judgments do not establish that the
 chosen construct is appropriate.
 
-Each observation row has six fields: `a`, `b` (the canonical unordered
+Each observation row has seven fields: `a`, `b` (the canonical unordered
 pair in original candidate-list order), `left`, `right` (the displayed
-ids), `repeat` (1-based index), and `verdict` (one of the five labels).
-Rows are never averaged. Storage is JSON Lines, one row per line.
-The deduplication key is `(a, b, left, right, repeat)`.
+ids), `repeat` (1-based index), `verdict` (one of the five labels), and
+`reasoning` (optional free-form audit metadata, e.g. the model's
+reasoning text). Rows are never averaged. Storage is JSON Lines, one
+row per line. The deduplication key is `(a, b, left, right, repeat)`;
+`reasoning` is not part of the key.
 
 The package does not provide a default prompt, judge, or LLM tool
 schema. Those are the caller's job. The package owns the schedule,
 the verdict vocabulary, and the model. Nothing else.
+
+### Optional: storing reasoning traces
+
+A `judge_fn` can return either a `Verdict` string or a
+`(Verdict, reasoning_str)` tuple. The reasoning string is stored on
+each `Observation` as audit metadata and is preserved through
+JSONL save/load, but it is ignored by the ranking model. Rows
+written before this field existed load with an empty string.
+
+```python
+def my_judge(left, right):
+    verdict, reasoning = call_my_model(left, right)
+    return (verdict, reasoning)
+
+observations = run_tournament(candidates, my_judge, repeats=3)
+save_observations_jsonl("observations.jsonl", observations)
+
+# reasoning lives on each observation but never enters the fit
+for o in load_observations_jsonl("observations.jsonl"):
+    print(o.verdict, "—", o.reasoning[:80])
+```
 
 ## Model
 
