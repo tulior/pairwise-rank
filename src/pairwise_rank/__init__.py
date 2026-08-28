@@ -16,6 +16,7 @@ from .protocol import (
     load_observations_jsonl,
 )
 from .model import fit, summarize, posterior_predictive_check, FitResult
+from .btd import fit_btd, summarize_btd, direct_summary, BTDFitResult
 
 __all__ = [
     "VERDICT_LEVELS",
@@ -33,4 +34,8 @@ __all__ = [
     "summarize",
     "posterior_predictive_check",
     "FitResult",
+    "fit_btd",
+    "summarize_btd",
+    "direct_summary",
+    "BTDFitResult",
 ]
