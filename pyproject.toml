@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pairwise-rank"
-version = "0.1.0"
-description = "Small research tool for repeated balanced pairwise ordinal judgments with uncertainty-aware ranking."
+version = "0.4.0"
+description = "Small tools for reproducible pairwise win/tie/loss evaluation, direct summaries, and Bayesian Davidson ranking."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

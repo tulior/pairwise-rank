@@ -1,15 +1,23 @@
 """Three-view report: direct W/L/T, BTD ranking, M0 ordinal ranking.
 
-Loads a list of observations, runs direct_summary, fit_btd, and fit_ordinal
-on the same data, and produces a side-by-side table plus agreement
-diagnostics. This is the routine report pattern for any
-multi-candidate tournament (>=5 items, >=30 obs recommended).
+Loads a list of observations, runs direct_summary, fit_btd, and
+(optionally) fit_ordinal on the same data, and produces a
+side-by-side table plus agreement diagnostics.
 
-For head-to-heads (2 items, <=30 obs) the PyMC fits are barely
-identifiable; use direct_summary() alone in that case.
+This is the routine report pattern for any multi-candidate
+tournament (>=5 items, >=30 obs recommended). For head-to-heads
+(2 items, <=30 obs) the PyMC fits are barely identifiable; use
+direct_summary() alone in that case.
 
 The function is pure: it returns a dict, writes nothing. The caller
 decides what to do with the result (print, save to JSON, etc.).
+
+Agreement between direct and BTD (and between BTD and the M0
+ordinal cross-check) means the ranking is robust to the choice
+of global inference model. It does not establish that the
+underlying construct is appropriate. The construct itself is
+defined by the judge's prompt and protocol; the model only
+estimates the relative ranking the judge is reporting.
 """
 from __future__ import annotations
 

@@ -1,38 +1,74 @@
 """Bradley-Terry-Davidson (BTD) pairwise model.
 
-The BTD model collapses the five-level ordinal verdict into three
-outcomes:
+The BTD model is the default probabilistic ranking model. It uses a
+3-outcome (LEFT / TIE / RIGHT) verdict scale and is fit jointly to all
+observations with a sum-to-zero item-strength prior.
 
-    verdict in {LEFT_STRONG, LEFT}   -> "left wins"  (code 0)
-    verdict == TIE                    -> "tie"        (code 1)
-    verdict in {RIGHT, RIGHT_STRONG}  -> "right wins" (code 2)
+# Model family
 
-This is the natural cross-check for the five-level ordered-logistic M0.
-The Davidson extension handles the tie outcome by adding a tie parameter
-nu that scales a geometric-mean tie region. The Rao-Kupper parameterization
-used here is:
+This is the Davidson (1970) extension of Bradley-Terry, with a tie
+term proportional to ``nu * sqrt(lambda_i * lambda_j)`` and ``nu > 0``:
 
-    p_i = exp(theta_i + beta_right_indicator_for_right_slot)
-    p_j = exp(theta_j)
-    nu  = exp(eta_tie)              # tie weight, > 0
-    d   = sqrt(p_i * p_j)           # geometric mean
+    lambda_i = exp(theta[i] + beta_right_if_i_on_right)
+    lambda_j = exp(theta[j])
 
-    P(left wins)  = p_j / (p_i + nu * d + p_j)
-    P(tie)        = nu * d / (p_i + nu * d + p_j)
-    P(right wins) = p_i / (p_i + nu * d + p_j)
+    P(i beats j)        = lambda_i / (lambda_i + lambda_j + nu * sqrt(lambda_i * lambda_j))
+    P(i ties j)         = nu * sqrt(lambda_i * lambda_j) / (lambda_i + lambda_j + nu * sqrt(lambda_i * lambda_j))
+    P(i loses to j)     = lambda_j / (lambda_i + lambda_j + nu * sqrt(lambda_i * lambda_j))
 
-A pair (i, j) is identified with (left, right) by the observation's
-left/right fields, not by the canonical (a, b) ordering. beta_right
-retains the same sign convention as the M0 model: positive beta_right
-means the right slot is advantaged.
+The tie term is a single global ``nu = exp(eta_tie)``. ``nu = 1`` is
+the symmetric tie prior. The likelihood is symmetric in (i, j) and
+reduces to Bradley-Terry as ``nu -> 0`` (forced-decision regime).
 
-Identifiability:
-    theta ~ ZeroSumNormal, so sum(theta) = 0 at every draw.
-    eta_tie has no sum constraint; it is a single tie-weight parameter.
+Note: this is **not** the Rao-Kupper parameterization. Rao-Kupper
+uses a tie term of the form ``nu * (lambda_i + lambda_j) / 2``; Davidson
+uses the geometric-mean form. The two are statistically distinguishable
+on real data. We use the Davidson form here.
 
-The model is fit to the same observations as M0. Use BTD as a secondary
-ranking to cross-check that the winner is robust to collapsing STRONG
-into ordinary wins/losses. The M0 model is the primary.
+# Implementation
+
+For a single observation (i = right slot, j = left slot), with
+beta_right the right-slot position offset:
+
+    log lambda_i = theta[rights] + beta_right
+    log lambda_j = theta[lefts]
+    log sqrt(lambda_i * lambda_j) = 0.5 * (log lambda_i + log lambda_j)
+
+The three log-probabilities (up to a shared log-Z constant) are:
+
+    log P(LEFT wins)   = theta[lefts]
+    log P(TIE)         = 0.5 * (theta[lefts] + theta[rights] + beta_right) + eta_tie
+    log P(RIGHT wins)  = theta[rights] + beta_right
+
+A custom log-likelihood is added via ``pm.Potential`` rather than
+``pm.Categorical`` (the latter is not exposed on every pytensor
+build). The categorical log-prob is built by hand and accumulated
+with the observed codes.
+
+# Backward compatibility
+
+Legacy 5-level observations (LEFT_STRONG, RIGHT_STRONG) are collapsed
+to 3-level (LEFT, RIGHT) before the fit. Collapse is the identity on
+LEFT, TIE, RIGHT. Old data on disk loads without migration.
+
+# Sign conventions
+
+- ``theta`` is relative to the current candidate field. ``sum(theta) = 0``
+  is enforced at every posterior draw via ``pm.ZeroSumNormal``.
+- Larger ``theta`` means stronger in general.
+- ``beta_right > 0`` means the right slot is advantaged.
+- For position-neutral predictions (e.g. tournament scores that
+  shouldn't depend on which slot the item happened to be on), set
+  ``beta_right = 0`` by passing ``position_neutral=True`` to
+  ``summarize_btd``.
+
+# Identifiability
+
+``theta`` is sum-to-zero; there is no separate intercept. ``eta_tie``
+is a single scalar (no per-item tie propensity). ``sigma_theta`` is
+the global scale of the strengths. The model has 3 global parameters
+plus ``N - 1`` sum-to-zero thetas, totaling ``N + 2`` effective
+parameters.
 """
 from __future__ import annotations
 
@@ -50,24 +86,28 @@ except ImportError as e:  # pragma: no cover
         "Install with: pip install pymc pytensor arviz"
     ) from e
 
-from .protocol import Observation, VERDICT_TO_CODE
+from .protocol import Observation, collapse_to_3_level
 
 
-# Map the five-level verdict onto the three-level BTD outcome.
-# LEFT_STRONG, LEFT   -> 0 (left wins)
-# TIE                 -> 1 (tie)
-# RIGHT, RIGHT_STRONG -> 2 (right wins)
 def _btd_code(verdict: str) -> int:
-    if verdict in ("LEFT_STRONG", "LEFT"):
+    """Map a verdict to the BTD 3-level outcome code.
+
+    LEFT_STRONG, LEFT  -> 0 (left wins)
+    TIE                -> 1 (tie)
+    RIGHT, RIGHT_STRONG -> 2 (right wins)
+
+    Accepts both legacy 5-level and current 3-level verdict strings.
+    """
+    v = collapse_to_3_level(verdict)
+    if v == "LEFT":
         return 0
-    if verdict == "TIE":
+    if v == "TIE":
         return 1
-    if verdict in ("RIGHT", "RIGHT_STRONG"):
+    if v == "RIGHT":
         return 2
     raise ValueError(f"unknown verdict: {verdict!r}")
 
 
-# Count how many STRONG verdicts the BTD model is collapsing.
 def _strong_count(obs: list[Observation]) -> dict[str, int]:
     n_left_strong = sum(1 for o in obs if o.verdict == "LEFT_STRONG")
     n_right_strong = sum(1 for o in obs if o.verdict == "RIGHT_STRONG")
@@ -129,30 +169,18 @@ def _build_btd_model(
         beta_right = pm.Normal("beta_right", 0.0, 0.5)
         eta_tie = pm.Normal("eta_tie", 0.0, 1.0)
 
-        # p_i = exp(theta_right + beta_right), p_j = exp(theta_left)
-        # For the Rao-Kupper likelihood we want
-        #   log_p_i = theta[rights] + beta_right
-        #   log_p_j = theta[lefts]
-        # which gives
-        #   d = sqrt(p_i * p_j) = exp((log_p_i + log_p_j) / 2)
+        # Davidson likelihood in log space.
+        #   log lambda_i = theta[rights] + beta_right  (right slot)
+        #   log lambda_j = theta[lefts]                  (left slot)
+        #   log sqrt(lambda_i * lambda_j) = 0.5 * (log lambda_i + log lambda_j)
         log_pi = theta[rights] + beta_right
         log_pj = theta[lefts]
         log_d = 0.5 * (log_pi + log_pj)
 
-        # Numerically stable log-likelihood for the categorical:
-        #   P(left wins)  = pj / (pi + nu*d + pj)
-        #   P(tie)        = nu*d / (pi + nu*d + pj)
-        #   P(right wins) = pi / (pi + nu*d + pj)
-        # The shared denominator in log space is
-        #   log Z = logsumexp(log_pi, log_pj + eta_tie, log_d + eta_tie - log 2)
-        # But we can build the per-class log-probs directly and let
-        # pymc's Categorical take care of the softmax.
-        a = log_pj                              # log P(left wins)  (up to -log Z)
+        a = log_pj                              # log P(left wins)   (up to -log Z)
         b = log_d + eta_tie                     # log P(tie)
         c = log_pi                              # log P(right wins)
-        # Use a custom log-probability rather than pm.Categorical with
-        # pt.softmax (which is not exposed on this pytensor build).
-        # log P(class k) = logit_k - logsumexp(logit_0, logit_1, logit_2)
+
         stacked = pt.stack([a, b, c], axis=1)
         log_Z = pt.logsumexp(stacked, axis=1)
         log_probs = stacked - log_Z[:, None]
@@ -172,7 +200,7 @@ def fit_btd(
 ) -> BTDFitResult:
     """Fit the Bradley-Terry-Davidson pairwise model.
 
-    The five-level ordinal verdicts are collapsed to three outcomes
+    The 5-level ordinal verdicts are collapsed to 3 outcomes
     (left wins / tie / right wins). STRONG verdicts become ordinary
     wins/losses. Position bias (beta_right) is included for parity
     with the M0 model.
@@ -225,20 +253,42 @@ def fit_btd(
 # Summaries
 # ----------------------------------------------------------------------------
 
+def _position_neutral_beta(beta_right_draws: np.ndarray, position_neutral: bool) -> np.ndarray:
+    """Return beta_right draws, optionally forced to zero."""
+    if not position_neutral:
+        return beta_right_draws
+    return np.zeros_like(beta_right_draws)
+
+
 def summarize_btd(
     result: BTDFitResult,
     observations=None,
     hdi_prob: float = 0.9,
+    position_neutral: bool = False,
 ) -> dict:
     """All posterior summaries in one call. JSON-serializable.
 
+    position_neutral:
+        If True, the per-pair and per-item predictions use
+        ``beta_right = 0``. The reported ``beta_right_mean`` and HDI
+        still come from the original posterior; only the predictions
+        are forced neutral. This is the right setting for tournament
+        scores and item rankings that should not depend on which slot
+        the item happened to appear in.
+
+        The default is ``False`` so users get the full posterior
+        summary including position effects. Set to ``True`` when
+        using the predictions to rank or score items.
+
     Keys mirror the M0 summarize() output where comparable, plus
-    `eta_tie` and `nu` for the tie-weight parameter. Pairwise keys
-    also include `p_left_wins` and `p_right_wins` from the BTD likelihood
-    directly (which already incorporate tie probability).
+    ``eta_tie`` and ``nu`` for the tie-weight parameter. Pairwise
+    keys also include ``p_left_wins`` and ``p_right_wins`` from the
+    BTD likelihood directly (which already incorporate tie
+    probability).
     """
     theta = result.theta_draws
     S, n = theta.shape
+    beta = _position_neutral_beta(result.beta_right_draws, position_neutral)
 
     ranks = np.argsort(-theta, axis=1)
     rank_pos = np.array([np.where(ranks == i)[1] for i in range(n)])
@@ -266,13 +316,10 @@ def summarize_btd(
             P[j, i] = 1.0 - P[i, j]
 
     # Pairwise BTD likelihood probabilities (account for ties and
-    # beta_right position effect). These are the per-pair P(left wins)
-    # and P(right wins) marginals under the model, averaged over all
-    # observations for that pair (both orientations).
+    # the chosen beta_right, possibly forced to zero).
     item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
     pairwise_lh: dict = {}
     if observations is not None:
-        beta = result.beta_right_draws
         nu = result.nu_draws
         for o in observations:
             i = item_to_idx[o.left]
@@ -297,7 +344,6 @@ def summarize_btd(
             entry["sum_tie"] += p_tie
             entry["sum_right"] += p_right
             entry["n"] += 1
-        # Convert to means
         for key, e in pairwise_lh.items():
             n_obs_for_pair = e["n"]
             pairwise_lh[key] = {
@@ -324,8 +370,8 @@ def summarize_btd(
                 entry["p_right_wins"] = lh["p_right_wins_mean"]
             pairwise[key] = entry
 
-    beta = result.beta_right_draws
-    beta_hdi = az.hdi(beta, hdi_prob=hdi_prob)
+    beta_orig = result.beta_right_draws
+    beta_hdi = az.hdi(beta_orig, hdi_prob=hdi_prob)
     sigma = result.sigma_theta_draws
     sigma_hdi = az.hdi(sigma, hdi_prob=hdi_prob)
     eta_tie = result.eta_tie_draws
@@ -342,7 +388,7 @@ def summarize_btd(
         "per_item": per_item,
         "pairwise": {f"{i},{j}": v for (i, j), v in pairwise.items()},
         "position_effect": {
-            "beta_right_mean": float(beta.mean()),
+            "beta_right_mean": float(beta_orig.mean()),
             "beta_right_hdi": [float(beta_hdi[0]), float(beta_hdi[1])],
         },
         "sigma_theta": {
@@ -355,6 +401,7 @@ def summarize_btd(
             "nu_mean": float(nu.mean()),
             "nu_hdi": [float(nu_hdi[0]), float(nu_hdi[1])],
         },
+        "position_neutral": bool(position_neutral),
     }
     if observations is not None:
         out["verdict_distribution_btd"] = _btd_verdict_counts(observations)
@@ -381,11 +428,32 @@ def _btd_verdict_counts(observations) -> dict[str, int]:
 # ----------------------------------------------------------------------------
 
 def direct_summary(observations) -> dict:
-    """Per-item direct W/L/T and direct pairwise tallies.
+    """Per-item direct W/L/T counts and direct pairwise tallies.
 
-    This is the third view in the standard report. It uses no model,
-    just the raw observations. It depends on the dedup invariant:
-    every (a, b) pair appears in both orientations.
+    This is the baseline view, no model. STRONG verdicts in the
+    observations are collapsed to ordinary LEFT/RIGHT before counting
+    so the tallies are over a 3-outcome alphabet.
+
+    The dedup invariant is: every (a, b) pair appears in both
+    orientations. If some orientations are missing, the per-pair
+    tallies are still reported but should be interpreted as partial.
+
+    Returns:
+        {
+          "per_item": {"wins": {...}, "losses": {...}, "ties": {...}},
+          "pairwise": {"<a>,<b>": {"wins_first": int, "wins_second": int, "ties": int}},
+          "tournament_score": {"<id>": float, ...},  # tie-adjusted, position-neutral
+          "n_observations": int,
+          "n_left_strong": int,    # how many LEFT_STRONG were collapsed
+          "n_right_strong": int,
+        }
+
+    tournament_score is a per-item score that gives half credit for
+    ties and full credit for wins, normalized by the number of
+    other items (N-1). A score of 1.0 means the item won against
+    every other item; 0.0 means it lost to every other item. The
+    score is position-neutral (it does not depend on which slot the
+    item appeared in).
     """
     from collections import defaultdict
 
@@ -394,11 +462,13 @@ def direct_summary(observations) -> dict:
     item_ties: dict[str, int] = defaultdict(int)
     pairs: dict[tuple[str, str], dict[str, int]] = {}
 
+    seen_items: set[str] = set()
     for o in observations:
         if not o.verdict:
             continue
         c = _btd_code(o.verdict)
-        # pair key (sorted, for direct pair table)
+        seen_items.add(o.a)
+        seen_items.add(o.b)
         p = tuple(sorted([o.a, o.b]))
         if p not in pairs:
             pairs[p] = {"wins_first": 0, "wins_second": 0, "ties": 0}
@@ -423,6 +493,17 @@ def direct_summary(observations) -> dict:
             else:
                 pairs[p]["wins_second"] += 1
 
+    # Tie-adjusted tournament score: wins + 0.5 ties, normalized by
+    # the number of other items. This is a position-neutral score.
+    n = len(seen_items)
+    tournament_score: dict[str, float] = {}
+    if n > 1:
+        denom = n - 1
+        for item in seen_items:
+            w = item_wins.get(item, 0)
+            t = item_ties.get(item, 0)
+            tournament_score[item] = (w + 0.5 * t) / denom
+
     return {
         "per_item": {
             "wins": dict(item_wins),
@@ -432,6 +513,7 @@ def direct_summary(observations) -> dict:
         "pairwise": {
             f"{p[0]},{p[1]}": v for p, v in pairs.items()
         },
+        "tournament_score": tournament_score,
         "n_observations": len([o for o in observations if o.verdict]),
         "n_left_strong": sum(1 for o in observations if o.verdict == "LEFT_STRONG"),
         "n_right_strong": sum(1 for o in observations if o.verdict == "RIGHT_STRONG"),

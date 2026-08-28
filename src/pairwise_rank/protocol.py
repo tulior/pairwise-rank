@@ -115,7 +115,10 @@ def collapse_to_3_level(verdict: str) -> str:
     RIGHT_STRONG -> RIGHT
     TIE / LEFT / RIGHT pass through unchanged.
 
-    This is what BTD and direct_summary do internally.
+    This is the single helper used by BTD and direct_summary so the
+    STRONG collapse is consistent across views. New code that needs
+    to normalize verdicts (e.g. for ad-hoc reporting) should call this
+    helper rather than re-implementing the mapping.
     """
     if verdict == "LEFT_STRONG":
         return "LEFT"

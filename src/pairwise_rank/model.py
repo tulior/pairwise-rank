@@ -1,25 +1,30 @@
 """Bayesian ordered-logistic (five-level) pairwise model.
 
-Status: OPTIONAL / LEGACY.
-
-The default model for new code is `pairwise_rank.fit_btd` (the
+Status: OPTIONAL. This is the legacy 5-level ordered logit. The
+recommended model for new code is `pairwise_rank.fit_btd` (the
 Bradley-Terry-Davidson model in btd.py), which uses a 3-level
-win/tie/loss verdict scale. The accumulated evidence across many
-tournaments (textual, bio, prefix-match, hex batch, 0x class)
-shows that the 5-level ordinal information is essentially unused:
-STRONG verdicts occur in <= 2% of observations, and BTD vs the
-ordered logistic give r_theta > 0.99 and r_P(best) > 0.99.
+win/tie/loss verdict scale. BTD is simpler, has fewer parameters,
+and matches observed behavior more closely on most real
+tournaments; the ordered logit is preserved for cases where
+preference intensity is genuinely elicited and the extra
+categories are materially populated.
 
-This model is preserved for the cases where intensity information
-genuinely matters:
+Use `fit_ordinal` only when at least one of the following is true:
   - STRONG verdicts occur often enough to be informative
-    (a reasonable trigger: STRONG > 10-15% of non-ties);
-  - STRONG vs ordinary wins show demonstrably different behavior;
+    (a rough trigger: STRONG > 10-15% of non-ties);
+  - STRONG vs ordinary wins show demonstrably different behavior
+    that the 3-level model cannot capture;
   - the prompt deliberately elicits intensity;
   - BTD and direct evidence show unresolved structure that the
     ordinal information might explain;
   - you are specifically studying whether preference magnitude
     matters.
+
+If you are using `fit_ordinal` routinely on data where STRONG
+verdicts are < 2% of non-ties, switch to `fit_btd`. The two
+models produce nearly identical rankings on such data
+(r_theta > 0.99, r_P(best) > 0.99 in our experiments), and the
+simpler model is preferred.
 
 Model:
     eta = theta_right - theta_left + beta_right
@@ -37,7 +42,9 @@ Sign conventions:
     - P(TIE) = P(y = 2) = sigmoid(c_2 - eta) - sigmoid(c_1 - eta).
 
 Public surface: fit_ordinal, summarize, posterior_predictive_check.
-The legacy name `fit` is preserved as an alias for fit_ordinal.
+The legacy name `fit` is preserved as an alias for fit_ordinal and
+emits a DeprecationWarning; new code should use fit_ordinal
+explicitly or fit_btd (the default).
 File I/O is the caller's responsibility.
 """
 from __future__ import annotations
