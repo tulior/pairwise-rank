@@ -166,6 +166,35 @@ Interpretation:
   lengthen `tune`, or reparameterize. Increasing `K` does not fix
   geometry.
 
+## Three-view report (direct + BTD + M0)
+
+For multi-candidate tournaments (≥5 items, ≥30 obs) the routine
+report pattern is to fit both models and compare. The two models
+have the same priors on `theta` and `beta_right`; the only
+difference is the verdict likelihood: M0 uses the five-level
+ordered logistic, BTD collapses `LEFT_STRONG`/`LEFT` into a single
+"left wins" outcome (and likewise on the right) and uses the
+Rao-Kupper three-outcome extension with a tie weight `nu`.
+
+```python
+from pairwise_rank import three_view_report, print_three_view
+
+report = three_view_report(observations, draws=2000, tune=2500, chains=4)
+print_three_view(report, label="my tournament")
+
+# report["top1"] = {"direct": ..., "btd": ..., "m0": ..., "all_three_agree": ...}
+# report["theta_corr_btd_m0"] = Pearson r between BTD and M0 theta means
+# report["pbest_corr_btd_m0"] = Pearson r between BTD and M0 P(best) values
+```
+
+If all three views agree on top-1, the winner is robust to modeling
+choice. If they disagree, the disagreement is diagnostic. Head-to-
+heads (≤2 items) are not informative under either model; use
+`direct_summary` alone in that case.
+
+See `examples/three_view.py` for a self-contained reproducible
+demonstration.
+
 ## License
 
 MIT. See `LICENSE`.
