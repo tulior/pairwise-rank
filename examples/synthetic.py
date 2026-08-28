@@ -4,9 +4,13 @@ Run with:
     python examples/synthetic.py
 
 Generates a small tournament over 4 fake candidates using a
-deterministic judge, writes observations to JSONL, fits the default
-model, and prints a summary. The judge here is a stand-in: replace
-it with your own callable for real use.
+deterministic 3-level judge, writes observations to JSONL, fits the
+default BTD model, and prints a summary. The judge here is a
+stand-in: replace it with your own callable for real use.
+
+This example uses the default 3-level verdict scale (LEFT, TIE,
+RIGHT). For the 5-level ordinal path see
+`examples/three_view.py` and the test_recovery.py test.
 """
 from __future__ import annotations
 
@@ -20,9 +24,9 @@ from pairwise_rank import (
     run_tournament,
     save_observations_jsonl,
     load_observations_jsonl,
-    fit,
-    summarize,
-    posterior_predictive_check,
+    fit_btd,
+    summarize_btd,
+    direct_summary,
 )
 
 
@@ -33,28 +37,25 @@ GROUND_TRUTH = {
     "delta": -1.5,
 }
 
-# Cutpoints for the synthetic judge: -1.5, -0.5, +0.5, +1.5
-CP = [-1.5, -0.5, 0.5, 1.5]
+# Cutpoints for the synthetic judge: -0.5 (LEFT vs TIE), +0.5 (TIE vs RIGHT)
+CP = [-0.5, 0.5]
 
 
 def synthetic_judge(left_id: str, right_id: str) -> str:
-    """Deterministic stand-in judge. The strength difference drives eta;
-    small noise is added so the synthetic data has some disagreement
-    across repeats. Replace with your own callable for real use.
+    """Deterministic stand-in 3-level judge. The strength difference
+    drives eta; small noise is added so the synthetic data has some
+    disagreement across repeats. Replace with your own callable for
+    real use.
     """
     diff = GROUND_TRUTH[right_id] - GROUND_TRUTH[left_id]
     rng = random.Random(hash((left_id, right_id)))
     eta = diff + rng.gauss(0, 0.2)
     if eta <= CP[0]:
-        return "LEFT_STRONG"
-    elif eta <= CP[1]:
         return "LEFT"
-    elif eta <= CP[2]:
+    elif eta <= CP[1]:
         return "TIE"
-    elif eta <= CP[3]:
-        return "RIGHT"
     else:
-        return "RIGHT_STRONG"
+        return "RIGHT"
 
 
 def main() -> None:
@@ -77,11 +78,16 @@ def main() -> None:
     observations = load_observations_jsonl(obs_path)
     print(f"# Reloaded {len(observations)} observations")
 
-    result = fit(observations, item_ids=candidate_ids, draws=1000, tune=1500, chains=4, seed=0)
-    summary = summarize(result, observations)
+    # Direct (model-free) summary
+    direct = direct_summary(observations)
+    print(f"\n# n_observations = {direct['n_observations']}")
+    print(f"# Direct verdict distribution: {direct['per_item']}")
 
-    print(f"\n# n_observations = {summary['n_observations']}")
-    print(f"# verdict_distribution = {summary['verdict_distribution']}")
+    # BTD fit (default probabilistic model)
+    result = fit_btd(observations, item_ids=candidate_ids, draws=1000, tune=1500, chains=4, seed=0)
+    summary = summarize_btd(result, observations)
+
+    print(f"\n# verdict_distribution_btd = {summary.get('verdict_distribution_btd', 'n/a')}")
 
     print("\n# Per-item summary:")
     print(f"{'id':<10}{'theta (true)':>14}{'theta (fit)':>14}{'P(best)':>10}{'E[rank]':>10}")
@@ -93,17 +99,16 @@ def main() -> None:
     pos = summary["position_effect"]
     print(f"\n# beta_right: {pos['beta_right_mean']:+.3f}  HDI: {pos['beta_right_hdi']}")
 
+    tp = summary.get("tie_parameter")
+    if tp:
+        print(f"# tie parameter (nu): {tp['nu_mean']:.3f}  HDI: {tp['nu_hdi']}")
+
     print("\n# Pairwise P(theta_i > theta_j):")
     for key, val in summary["pairwise"].items():
         i, j = key.split(",")
-        # Map indices back to ids for the print
         ii = summary["item_ids"][int(i)]
         jj = summary["item_ids"][int(j)]
         print(f"  P({ii} > {jj}) = {val['p_i_gt_j']:.3f}")
-
-    ppc = posterior_predictive_check(result, observations, n_ppc=500, seed=0)
-    print(f"\n# PPC repeat-agreement: observed={ppc['observed']:.3f}, "
-          f"ppc mean={ppc['ppc_mean']:.3f}, p_ppc_ge_observed={ppc['p_ppc_ge_observed']:.3f}")
 
     results_path = out_dir / "fit_summary.json"
     with open(results_path, "w") as f:

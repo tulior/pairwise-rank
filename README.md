@@ -1,6 +1,38 @@
 # pairwise-rank
 
-Small research tool for repeated balanced pairwise ordinal judgments with uncertainty-aware ranking.
+Small research tool for repeated balanced pairwise ranking with uncertainty quantification.
+
+The core is **win/tie/loss** ranking with position bias and Bayesian
+global inference. STRONG verdicts are an optional 5-level extension
+preserved for backward compatibility; the default is the 3-level
+scale `LEFT, TIE, RIGHT`.
+
+## Architecture
+
+```
+direct_summary     baseline / always (no model, raw W/L/T)
+fit_btd            default probabilistic model (3-level BTD)
+fit_ordinal        optional / legacy (5-level ordered logit)
+fit                DEPRECATED alias for fit_ordinal
+```
+
+Why BTD is the default: across many tournaments (textual, bio,
+prefix-match, hex batch, 0x class), STRONG verdicts occur in
+≤2% of observations, and BTD vs the 5-level ordered logit give
+`r_θ > 0.99` and `r_P(best) > 0.99`. The 3-level protocol is simpler
+for the judge, has fewer tool-schema errors, and matches observed
+behavior more closely. Same decision information, simpler likelihood,
+prefer simpler.
+
+Use `fit_ordinal` only when:
+- STRONG responses occur often enough to matter
+  (a rough trigger: STRONG > 10-15% of non-ties);
+- STRONG vs ordinary wins show demonstrably different behavior;
+- the prompt deliberately elicits intensity;
+- BTD and direct evidence show unresolved structure that the
+  ordinal information might explain;
+- you are specifically studying whether preference magnitude
+  matters.
 
 ## Usage
 
@@ -17,7 +49,7 @@ python examples/synthetic.py
 ```
 
 This writes observations to `/tmp/pairwise_rank_synthetic/observations.jsonl`,
-fits the default model, and writes a summary to
+fits the default BTD model, and writes a summary to
 `/tmp/pairwise_rank_synthetic/fit_summary.json`.
 
 The standard flow:
@@ -25,12 +57,12 @@ The standard flow:
 ```python
 from pairwise_rank import (
     run_tournament, save_observations_jsonl, load_observations_jsonl,
-    fit, summarize, posterior_predictive_check,
+    fit_btd, summarize_btd, direct_summary,
 )
 
 # 1. Build a judge function (left_id, right_id) -> verdict
 def my_judge(left, right):
-    # call your model, return one of the five verdict strings
+    # call your model, return one of: "LEFT", "TIE", "RIGHT"
     ...
 
 # 2. Run the tournament; observations are returned with verdicts filled in
@@ -40,18 +72,27 @@ observations = run_tournament(candidates, my_judge, repeats=3)
 # 3. Persist
 save_observations_jsonl("observations.jsonl", observations)
 
-# 4. Fit
-result = fit(load_observations_jsonl("observations.jsonl"))
+# 4. Direct (model-free) baseline
+direct = direct_summary(observations)
+print(direct["per_item"])  # wins, losses, ties
 
-# 5. Summarize
-summary = summarize(result, observations)
+# 5. Fit BTD (default probabilistic model)
+result = fit_btd(load_observations_jsonl("observations.jsonl"))
+
+# 6. Summarize
+summary = summarize_btd(result, observations)
 print(summary["per_item"])          # theta, P(best), expected_rank
 print(summary["pairwise"])          # P(theta_i > theta_j)
 print(summary["position_effect"])   # beta_right mean and HDI
-
-# 6. Optional: one-shot posterior predictive check
-ppc = posterior_predictive_check(result, observations)
+print(summary["tie_parameter"])     # nu (Rao-Kupper tie weight)
 ```
+
+For 5-level ordinal data on disk (legacy), `fit_btd` automatically
+collapses `LEFT_STRONG → LEFT` and `RIGHT_STRONG → RIGHT`. To use
+the 5-level ordered-logit model explicitly, use `fit_ordinal` and
+`run_tournament(..., verdict_levels=VERDICT_LEVELS_5)`. See
+`examples/three_view.py` and the test_recovery.py test for the
+5-level path.
 
 Resume is achieved by passing existing observations back in:
 
@@ -75,11 +116,12 @@ chosen construct is appropriate.
 
 Each observation row has seven fields: `a`, `b` (the canonical unordered
 pair in original candidate-list order), `left`, `right` (the displayed
-ids), `repeat` (1-based index), `verdict` (one of the five labels), and
-`reasoning` (optional free-form audit metadata, e.g. the model's
-reasoning text). Rows are never averaged. Storage is JSON Lines, one
-row per line. The deduplication key is `(a, b, left, right, repeat)`;
-`reasoning` is not part of the key.
+ids), `repeat` (1-based index), `verdict` (one of the 3-level labels
+by default; 5-level labels if observed on legacy data), and `reasoning`
+(optional free-form audit metadata, e.g. the model's reasoning text).
+Rows are never averaged. Storage is JSON Lines, one row per line.
+The deduplication key is `(a, b, left, right, repeat)`; `reasoning`
+is not part of the key.
 
 The package does not provide a default prompt, judge, or LLM tool
 schema. Those are the caller's job. The package owns the schedule,
@@ -108,6 +150,34 @@ for o in load_observations_jsonl("observations.jsonl"):
 
 ## Model
 
+Two models are provided. The default is **BTD** (3-level); the
+**5-level ordered logit** is preserved as `fit_ordinal` for cases
+where intensity matters.
+
+### BTD (default, 3-level)
+
+```
+eta = theta_right - theta_left + beta_right
+theta ~ ZeroSumNormal(sigma = sigma_theta)        # sum-to-zero
+sigma_theta ~ HalfNormal(1.0)
+beta_right ~ Normal(0, 0.5)                       # right-slot position effect
+eta_tie ~ Normal(0, 1)                            # log Rao-Kupper tie weight
+nu = exp(eta_tie)                                 # tie weight
+
+log P(left wins)  = theta[ left] - Z
+log P(tie)        = 0.5*(theta[ left] + theta[ right] + beta_right) + eta_tie - Z
+log P(right wins) = theta[ right] + beta_right - Z
+y_obs ~ Categorical(softmax([left, tie, right]))
+```
+
+Sign conventions:
+
+- Larger `theta` means stronger in general.
+- `beta_right > 0` means the right slot is advantaged.
+- `nu = 1` is the symmetric tie prior; `nu > 1` favors ties, `nu < 1` penalizes them.
+
+### Ordered logistic (optional / legacy, 5-level)
+
 ```
 eta = theta_right - theta_left + beta_right
 theta ~ ZeroSumNormal(sigma = sigma_theta)        # sum-to-zero
@@ -117,29 +187,25 @@ cutpoints: 3 positive gaps via softplus(gap_raw), then zero-centered
 y_obs ~ OrderedLogistic(eta, cutpoints)          # 0..4
 ```
 
-Sign conventions:
-
-- Larger `theta` means stronger in general.
-- `beta_right > 0` means the right slot is advantaged.
 - Verdict scale: 0 = `LEFT_STRONG`, 1 = `LEFT`, 2 = `TIE`, 3 = `RIGHT`, 4 = `RIGHT_STRONG`.
 - `P(left wins) = P(y in {0,1}) = sigmoid(c_1 - eta)` using the upper bound of the LEFT region.
 - `P(TIE) = P(y = 2) = sigmoid(c_2 - eta) - sigmoid(c_1 - eta)`.
 
-The default model has one global strength per item and one
-right-slot position effect. It does not include cycle-space or
-per-cell random effects; those are experimental extensions that
-are not part of v0.1.
+Use only when the 5-level scale is actually carrying useful information
+(see the Architecture section for triggers).
 
 ## Results
 
-`summarize(result, observations)` returns:
+`summarize_btd(result, observations)` returns:
 
 - `per_item`: per-item `theta_mean`, 90% HDI, `P(best)`, `P(top2)`, `expected_rank`.
-- `pairwise`: `P(theta_i > theta_j)` and posterior delta HDI for every unordered pair.
+- `pairwise`: `P(theta_i > theta_j)`, posterior delta HDI, and the
+  Rao-Kupper likelihood probabilities `P(left wins)`, `P(tie)`,
+  `P(right wins)` averaged across orientations.
 - `position_effect`: `beta_right` mean and 90% HDI.
 - `sigma_theta`: posterior of the scale of the global strengths.
-- `cutpoints`: posterior of the four ordered cutpoints.
-- `verdict_distribution`: counts of each verdict label in the observations.
+- `tie_parameter`: `eta_tie` and `nu` posterior summaries.
+- `verdict_distribution_btd`: collapsed 3-level counts.
 
 Interpretation:
 
@@ -166,19 +232,19 @@ Interpretation:
   lengthen `tune`, or reparameterize. Increasing `K` does not fix
   geometry.
 
-## Three-view report (direct + BTD + M0)
+## Three-view report (direct + BTD + ordinal)
 
 For multi-candidate tournaments (≥5 items, ≥30 obs) the routine
-report pattern is to fit both models and compare. The two models
-have the same priors on `theta` and `beta_right`; the only
-difference is the verdict likelihood: M0 uses the five-level
-ordered logistic, BTD collapses `LEFT_STRONG`/`LEFT` into a single
-"left wins" outcome (and likewise on the right) and uses the
-Rao-Kupper three-outcome extension with a tie weight `nu`.
+report pattern is to compare the three views. BTD is the default
+probabilistic model; the 5-level ordered logistic is included as
+a cross-check to confirm the ranking is robust to modeling choice.
 
 ```python
 from pairwise_rank import three_view_report, print_three_view
 
+# include_ordinal=True (default) runs both BTD and the ordered logit.
+# Pass include_ordinal=False to skip the M0 fit (saves time when
+# STRONG is rare and the cross-check is not informative).
 report = three_view_report(observations, draws=2000, tune=2500, chains=4)
 print_three_view(report, label="my tournament")
 
@@ -188,9 +254,12 @@ print_three_view(report, label="my tournament")
 ```
 
 If all three views agree on top-1, the winner is robust to modeling
-choice. If they disagree, the disagreement is diagnostic. Head-to-
-heads (≤2 items) are not informative under either model; use
-`direct_summary` alone in that case.
+choice. If they disagree, the disagreement is diagnostic. In
+practice, the BTD vs ordinal-logit correlation is > 0.99 on every
+tournament we have run; the cross-check is included as insurance,
+not because we expect disagreement. Head-to-heads (≤2 items) are
+not informative under either model; use `direct_summary` alone
+in that case.
 
 See `examples/three_view.py` for a self-contained reproducible
 demonstration.

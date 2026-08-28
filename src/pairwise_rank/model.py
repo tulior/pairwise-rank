@@ -1,4 +1,25 @@
-"""Default Bayesian ordered logistic pairwise model.
+"""Bayesian ordered-logistic (five-level) pairwise model.
+
+Status: OPTIONAL / LEGACY.
+
+The default model for new code is `pairwise_rank.fit_btd` (the
+Bradley-Terry-Davidson model in btd.py), which uses a 3-level
+win/tie/loss verdict scale. The accumulated evidence across many
+tournaments (textual, bio, prefix-match, hex batch, 0x class)
+shows that the 5-level ordinal information is essentially unused:
+STRONG verdicts occur in <= 2% of observations, and BTD vs the
+ordered logistic give r_theta > 0.99 and r_P(best) > 0.99.
+
+This model is preserved for the cases where intensity information
+genuinely matters:
+  - STRONG verdicts occur often enough to be informative
+    (a reasonable trigger: STRONG > 10-15% of non-ties);
+  - STRONG vs ordinary wins show demonstrably different behavior;
+  - the prompt deliberately elicits intensity;
+  - BTD and direct evidence show unresolved structure that the
+    ordinal information might explain;
+  - you are specifically studying whether preference magnitude
+    matters.
 
 Model:
     eta = theta_right - theta_left + beta_right
@@ -15,7 +36,8 @@ Sign conventions:
     - P(left wins) = P(y in {0,1}) = sigmoid(c_1 - eta) using c_1 (upper bound of LEFT region).
     - P(TIE) = P(y = 2) = sigmoid(c_2 - eta) - sigmoid(c_1 - eta).
 
-Public surface is three functions: fit, summarize, posterior_predictive_check.
+Public surface: fit_ordinal, summarize, posterior_predictive_check.
+The legacy name `fit` is preserved as an alias for fit_ordinal.
 File I/O is the caller's responsibility.
 """
 from __future__ import annotations
@@ -94,7 +116,7 @@ def _build_model(observations: list[Observation], item_to_idx: dict[str, int], n
     return model
 
 
-def fit(
+def fit_ordinal(
     observations: Iterable[Observation],
     *,
     item_ids: list[str] | None = None,
@@ -104,7 +126,11 @@ def fit(
     target_accept: float = 0.99,
     seed: int = 0,
 ) -> FitResult:
-    """Fit the default ordered-logistic pairwise model.
+    """Fit the five-level ordered-logistic pairwise model.
+
+    Status: OPTIONAL / LEGACY. Use fit_btd() as the default probabilistic
+    model for new code. See module docstring for when to use this
+    model instead.
 
     observations: list of Observation. Rows with empty verdicts are dropped.
     item_ids: optional explicit ordering. If None, ids are inferred and sorted.
@@ -144,6 +170,46 @@ def fit(
             "target_accept": target_accept, "seed": seed,
             "n_observations": len(obs),
         },
+    )
+
+
+# Backward-compatible alias. The legacy name `fit` still works but
+# emits a DeprecationWarning at runtime. New code should use
+# fit_ordinal() or fit_btd().
+import warnings as _warnings
+
+
+def fit(
+    observations: Iterable[Observation],
+    *,
+    item_ids: list[str] | None = None,
+    draws: int = 2000,
+    tune: int = 2500,
+    chains: int = 4,
+    target_accept: float = 0.99,
+    seed: int = 0,
+) -> FitResult:
+    """DEPRECATED: alias for fit_ordinal(). Use fit_ordinal() or fit_btd().
+
+    Kept for backward compatibility. New code should call fit_btd()
+    (the BTD model in btd.py) as the default probabilistic model.
+    """
+    _warnings.warn(
+        "pairwise_rank.fit is deprecated. Use fit_ordinal() for the "
+        "5-level ordered-logistic model (now optional/legacy) or "
+        "fit_btd() for the default 3-level BTD model. See module "
+        "docstring of model.py and btd.py for guidance.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return fit_ordinal(
+        observations,
+        item_ids=item_ids,
+        draws=draws,
+        tune=tune,
+        chains=chains,
+        target_accept=target_accept,
+        seed=seed,
     )
 
 

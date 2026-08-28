@@ -1,12 +1,14 @@
 """Tournament protocol: schedule, run, persist.
 
 Owns:
-  Verdict (alias for str, restricted to VERDICT_LEVELS)
-  verdict_to_code / code_to_verdict
+  VERDICT_LEVELS (default 3-level: LEFT, TIE, RIGHT)
+  VERDICT_LEVELS_5 (5-level ordinal: LEFT_STRONG, LEFT, TIE, RIGHT, RIGHT_STRONG)
+  DEFAULT_VERDICT_LEVELS (alias for VERDICT_LEVELS)
+  verdict_to_code / code_to_verdict / collapse_to_3_level
   Observation
   observation_key
   make_schedule(candidate_ids, repeats)
-  run_tournament(candidate_ids, judge_fn, repeats=3, existing=())
+  run_tournament(candidate_ids, judge_fn, repeats=3, existing=(), verdict_levels=VERDICT_LEVELS)
   save_observations_jsonl / load_observations_jsonl
 
 The protocol is construct-agnostic. The judge is a caller-supplied
@@ -15,8 +17,23 @@ to also record audit metadata (e.g. model reasoning text) can return
 a (Verdict, str) tuple; the second element is stored on the
 Observation as `reasoning` and is ignored by the ranking model.
 
+Verdict scale:
+  The default is the 3-level scale (LEFT, TIE, RIGHT). The 5-level
+  scale is available as VERDICT_LEVELS_5 for backward compatibility
+  and for prompts that genuinely elicit intensity information. New
+  code should use the 3-level default unless there is a specific
+  reason to capture STRONG.
+
+Backward compatibility:
+  Existing observations on disk with 5-level verdicts (LEFT_STRONG,
+  RIGHT_STRONG) load correctly. fit_btd and direct_summary collapse
+  STRONG into ordinary LEFT/RIGHT internally, so old data works
+  with the new default without any migration step.
+
 The package does not provide a default prompt, an LLM tool schema, or
-a provider abstraction. Those are the caller's job.
+a provider abstraction. Those are the caller's job. The canonical
+3-level tool schema can be obtained from the example in
+`examples/three_view.py`.
 """
 from __future__ import annotations
 
@@ -25,7 +42,7 @@ from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Callable, Iterable, Tuple, Union
 
-VERDICT_LEVELS: tuple[str, ...] = (
+VERDICT_LEVELS_5: tuple[str, ...] = (
     "LEFT_STRONG",
     "LEFT",
     "TIE",
@@ -33,22 +50,78 @@ VERDICT_LEVELS: tuple[str, ...] = (
     "RIGHT_STRONG",
 )
 
-# A Verdict is one of the five ordinal labels.
+# Default 3-level verdict scale. The accumulated evidence across
+# multiple tournaments (textual, bio, prefix-match, hex batch, 0x
+# class) shows that STRONG verdicts occur in <= 2% of observations
+# and the collapsed 3-level inference is essentially identical to
+# the 5-level inference (r_theta > 0.99, r_P(best) > 0.99). The
+# simpler protocol also reduces tool-schema friction and the rate
+# of malformed verdicts.
+#
+# The 5-level scale is preserved for backward compatibility and
+# for the cases where intensity genuinely matters (see model.py:
+# fit_ordinal). New code should use the 3-level default.
+VERDICT_LEVELS: tuple[str, ...] = (
+    "LEFT",
+    "TIE",
+    "RIGHT",
+)
+
+# Alias for clarity in new code: prefer this over VERDICT_LEVELS
+# when reading.
+DEFAULT_VERDICT_LEVELS: tuple[str, ...] = VERDICT_LEVELS
+
+# A Verdict is one of the labels in whichever scale the caller is
+# using. By default it is one of the three-level labels.
 Verdict = str
 
-VERDICT_TO_CODE: dict[str, int] = {v: i for i, v in enumerate(VERDICT_LEVELS)}
+# Built from the 5-level scale so legacy data loads correctly and
+# so _split_judge_return accepts any of the 5 codes. Validation in
+# run_tournament uses verdict_levels=VERDICT_LEVELS by default,
+# which only accepts the 3-level codes; pass verdict_levels=
+# VERDICT_LEVELS_5 to accept the 5-level scale.
+VERDICT_TO_CODE: dict[str, int] = {v: i for i, v in enumerate(VERDICT_LEVELS_5)}
+
+# Code mapping for 3-level scale (used by BTD).
+VERDICT_TO_CODE_3: dict[str, int] = {v: i for i, v in enumerate(VERDICT_LEVELS)}
 
 
 def verdict_to_code(verdict: str) -> int:
-    if verdict not in VERDICT_TO_CODE:
-        raise ValueError(f"unknown verdict: {verdict!r}; expected one of {VERDICT_LEVELS}")
-    return VERDICT_TO_CODE[verdict]
+    """Map a 5-level verdict to its code (0..4).
+
+    For backward compatibility, also accepts 3-level verdicts and
+    returns the corresponding code. Use _btd_code() for the 3-level
+    BTD likelihood mapping (left wins / tie / right wins).
+    """
+    if verdict in VERDICT_TO_CODE:
+        return VERDICT_TO_CODE[verdict]
+    if verdict in VERDICT_TO_CODE_3:
+        return VERDICT_TO_CODE_3[verdict]
+    raise ValueError(
+        f"unknown verdict: {verdict!r}; expected one of {VERDICT_LEVELS_5}"
+    )
 
 
 def code_to_verdict(code: int) -> str:
     if not 0 <= code <= 4:
         raise ValueError(f"verdict code out of range: {code}")
-    return VERDICT_LEVELS[code]
+    return VERDICT_LEVELS_5[code]
+
+
+def collapse_to_3_level(verdict: str) -> str:
+    """Collapse a 5-level verdict to 3-level: STRONG -> ordinary.
+
+    LEFT_STRONG  -> LEFT
+    RIGHT_STRONG -> RIGHT
+    TIE / LEFT / RIGHT pass through unchanged.
+
+    This is what BTD and direct_summary do internally.
+    """
+    if verdict == "LEFT_STRONG":
+        return "LEFT"
+    if verdict == "RIGHT_STRONG":
+        return "RIGHT"
+    return verdict
 
 
 # A JudgeFn may return either:
@@ -142,6 +215,7 @@ def run_tournament(
     judge_fn: JudgeFn,
     repeats: int = 3,
     existing: Iterable[Observation] = (),
+    verdict_levels: tuple[str, ...] = VERDICT_LEVELS,
 ) -> list[Observation]:
     """Execute the full tournament schedule, skipping already-completed keys.
 
@@ -153,15 +227,23 @@ def run_tournament(
     judge_fn is called once per unfinished row. It may return either a
     Verdict string or a (Verdict, reasoning_str) tuple. The reasoning
     string is stored on the Observation but is not used by the model.
-    If the returned verdict is not in VERDICT_LEVELS, ValueError is
+    If the returned verdict is not in verdict_levels, ValueError is
     raised. If judge_fn raises an exception, the exception propagates.
     There is no built-in retry; wrap judge_fn with retry logic if
     needed.
+
+    verdict_levels defaults to the 3-level scale (LEFT, TIE, RIGHT).
+    Pass VERDICT_LEVELS_5 to use the 5-level ordinal scale (LEFT_STRONG,
+    LEFT, TIE, RIGHT, RIGHT_STRONG). The 3-level scale is recommended
+    for new code: the accumulated evidence across many tournaments
+    shows STRONG verdicts in <= 2% of observations and the 3-level
+    inference is essentially identical to the 5-level inference.
 
     The function makes no assumptions about the judge, the prompt, the
     modality, or the persistence layer. It only handles scheduling,
     dedup, and verdict validation.
     """
+    allowed = set(verdict_levels)
     schedule = make_schedule(candidate_ids, repeats)
     done = {observation_key(o) for o in existing}
     out = list(existing)
@@ -170,10 +252,10 @@ def run_tournament(
             continue
         result = judge_fn(obs.left, obs.right)
         verdict, reasoning = _split_judge_return(result)
-        if verdict not in VERDICT_TO_CODE:
+        if verdict not in allowed:
             raise ValueError(
                 f"judge_fn returned invalid verdict: {verdict!r}; "
-                f"expected one of {VERDICT_LEVELS}"
+                f"expected one of {list(verdict_levels)}"
             )
         obs.verdict = verdict
         obs.reasoning = reasoning

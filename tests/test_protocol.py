@@ -11,6 +11,8 @@ from pairwise_rank import (
     run_tournament,
     save_observations_jsonl,
     load_observations_jsonl,
+    # Imported lazily inside test bodies that need them, to avoid
+    # pulling extra modules into every test:
 )
 
 
@@ -230,3 +232,98 @@ def test_reasoning_does_not_affect_fit(tmp_path):
     np.testing.assert_allclose(r1.beta_right_draws, r2.beta_right_draws, atol=1e-6)
     np.testing.assert_allclose(r1.cutpoint_draws, r2.cutpoint_draws, atol=1e-6)
     np.testing.assert_allclose(r1.sigma_theta_draws, r2.sigma_theta_draws, atol=1e-6)
+
+
+# 18. Default verdict scale is 3-level
+def test_default_verdict_levels_is_3_level():
+    from pairwise_rank import VERDICT_LEVELS, VERDICT_LEVELS_5
+    assert VERDICT_LEVELS == ("LEFT", "TIE", "RIGHT")
+    assert VERDICT_LEVELS_5 == ("LEFT_STRONG", "LEFT", "TIE", "RIGHT", "RIGHT_STRONG")
+    # 3-level is the default for run_tournament
+    assert len(VERDICT_LEVELS) == 3
+
+
+# 19. collapse_to_3_level
+def test_collapse_to_3_level():
+    from pairwise_rank import collapse_to_3_level
+    assert collapse_to_3_level("LEFT_STRONG") == "LEFT"
+    assert collapse_to_3_level("RIGHT_STRONG") == "RIGHT"
+    assert collapse_to_3_level("LEFT") == "LEFT"
+    assert collapse_to_3_level("TIE") == "TIE"
+    assert collapse_to_3_level("RIGHT") == "RIGHT"
+
+
+# 20. run_tournament rejects 5-level verdicts by default
+def test_run_tournament_rejects_5level_by_default():
+    """With the new 3-level default, a 5-level verdict should be rejected."""
+    def five_level_judge(left, right):
+        return "LEFT_STRONG"
+    with pytest.raises(ValueError, match="invalid verdict"):
+        run_tournament(["a", "b"], five_level_judge, repeats=1)
+
+
+# 21. run_tournament accepts 5-level verdicts when explicitly enabled
+def test_run_tournament_accepts_5level_when_enabled():
+    from pairwise_rank import VERDICT_LEVELS_5
+    def five_level_judge(left, right):
+        return "LEFT_STRONG"
+    obs = run_tournament(
+        ["a", "b"], five_level_judge, repeats=1,
+        verdict_levels=VERDICT_LEVELS_5,
+    )
+    # 2 items, 1 repeat, 2 orientations = 2 obs
+    assert len(obs) == 2
+    assert all(o.verdict == "LEFT_STRONG" for o in obs)
+
+
+# 22. 5-level data on disk loads correctly with default loader
+def test_5level_data_on_disk_loads_fine():
+    """Backward compat: legacy 5-level data loads without migration."""
+    from pairwise_rank import load_observations_jsonl, fit_btd
+    import json
+    from pathlib import Path
+    import tempfile
+    rows = [
+        {"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, "verdict": "LEFT_STRONG"},
+        {"a": "a", "b": "b", "left": "b", "right": "a", "repeat": 1, "verdict": "TIE"},
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        tmppath = f.name
+    obs = load_observations_jsonl(Path(tmppath))
+    assert obs[0].verdict == "LEFT_STRONG"
+    assert obs[1].verdict == "TIE"
+    # fit_btd collapses STRONG automatically
+    result = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    assert result.n == 2
+
+
+# 23. fit() emits DeprecationWarning (legacy 5-level alias)
+def test_fit_emits_deprecation_warning():
+    from pairwise_rank import fit, Observation
+    import warnings
+    obs = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="LEFT")]
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        fit(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    deprecation_warnings = [
+        x for x in w
+        if issubclass(x.category, DeprecationWarning)
+        and "fit is deprecated" in str(x.message)
+    ]
+    assert len(deprecation_warnings) >= 1
+
+
+# 24. fit_ordinal is the canonical name; fit() routes to it
+def test_fit_routes_to_fit_ordinal():
+    import warnings
+    from pairwise_rank import fit, fit_ordinal
+    obs = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="LEFT")]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        r_legacy = fit(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+        r_new = fit_ordinal(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    # Same draws, same seed, same obs -> same posterior
+    import numpy as np
+    np.testing.assert_allclose(r_legacy.theta_draws, r_new.theta_draws, atol=1e-6)

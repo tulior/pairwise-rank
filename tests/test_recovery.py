@@ -2,7 +2,7 @@
 
 A slower test than the unit tests. Generates a small balanced
 tournament with a deterministic ground-truth judge, fits the
-default model, and checks that:
+five-level ordinal model, and checks that:
 
   1. the recovered theta ordering matches the truth ordering
   2. the strongest item has P(best) close to 1
@@ -11,14 +11,18 @@ default model, and checks that:
 Uses a fixed seed and deliberately large separations so the result
 is robust. Does not check magnitudes (the model's prior on cutpoints
 differs from the synthetic judge's hard cutoffs).
+
+This test exercises the legacy 5-level path explicitly. The default
+3-level path is exercised by examples/three_view.py.
 """
 from __future__ import annotations
 
 import random
 
 from pairwise_rank import (
+    VERDICT_LEVELS_5,
     run_tournament,
-    fit,
+    fit_ordinal,
     summarize,
 )
 
@@ -49,12 +53,15 @@ def synthetic_judge(left_id: str, right_id: str) -> str:
         return "RIGHT_STRONG"
 
 
-# 12. synthetic end-to-end model smoke/recovery
+# 12. synthetic end-to-end model smoke/recovery (5-level ordinal path)
 def test_synthetic_end_to_end_recovers_ordering():
     candidate_ids = list(GROUND_TRUTH.keys())
-    observations = run_tournament(candidate_ids, synthetic_judge, repeats=6)
+    observations = run_tournament(
+        candidate_ids, synthetic_judge, repeats=6,
+        verdict_levels=VERDICT_LEVELS_5,
+    )
 
-    result = fit(observations, item_ids=candidate_ids, draws=1000, tune=1500, chains=4, seed=0)
+    result = fit_ordinal(observations, item_ids=candidate_ids, draws=1000, tune=1500, chains=4, seed=0)
     s = summarize(result)
 
     fit_order = sorted(s["per_item"], key=lambda r: -r["theta_mean"])

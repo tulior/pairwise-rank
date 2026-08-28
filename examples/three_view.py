@@ -5,9 +5,9 @@ ordinal ranking, all on the same observations. The three views are
 cross-checked: if all three put the same item first, the winner is
 robust to modeling choice.
 
-This example uses the synthetic judge so it is fully reproducible and
-self-contained. Replace the judge with your own callable for real
-use.
+This example uses the synthetic 3-level judge so it is fully
+reproducible and self-contained. Replace the judge with your own
+callable for real use.
 
 Run with:
     python examples/three_view.py
@@ -35,26 +35,21 @@ GROUND_TRUTH = {
 
 
 def deterministic_judge(left: str, right: str) -> tuple[str, str]:
-    """Synthetic 5-level judge based on ground-truth strengths.
+    """Synthetic 3-level judge based on ground-truth strengths.
 
     Returns (verdict, reasoning). The reasoning is a short fake
     audit-trail string so the test exercises the (verdict, reasoning)
     return path.
     """
     diff = GROUND_TRUTH[right] - GROUND_TRUTH[left]
-    # Add small jitter to make verdicts probabilistic
     rng = random.Random(hash((left, right)) & 0xFFFFFFFF)
     observed = diff + rng.uniform(-0.5, 0.5)
-    if observed > 1.5:
-        verdict = "RIGHT_STRONG"
-    elif observed > 0.5:
+    if observed > 0.5:
         verdict = "RIGHT"
     elif observed > -0.5:
         verdict = "TIE"
-    elif observed > -1.5:
-        verdict = "LEFT"
     else:
-        verdict = "LEFT_STRONG"
+        verdict = "LEFT"
     reasoning = f"ground_truth_diff={diff:.2f}, observed={observed:.2f}"
     return verdict, reasoning
 
@@ -67,7 +62,7 @@ def main() -> None:
     report = three_view_report(
         obs, draws=2000, tune=2500, chains=4, target_accept=0.99, seed=0,
     )
-    print_three_view(report, label="synthetic four-candidate tournament")
+    print_three_view(report, label="synthetic four-candidate tournament (3-level)")
 
     print()
     if report["top1"]["all_three_agree"]:
