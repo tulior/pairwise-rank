@@ -17,6 +17,7 @@ from .protocol import (
 )
 from .model import fit, summarize, posterior_predictive_check, FitResult
 from .btd import fit_btd, summarize_btd, direct_summary, BTDFitResult
+from .report import three_view_report, print_three_view
 
 __all__ = [
     "VERDICT_LEVELS",
@@ -38,4 +39,6 @@ __all__ = [
     "summarize_btd",
     "direct_summary",
     "BTDFitResult",
+    "three_view_report",
+    "print_three_view",
 ]
