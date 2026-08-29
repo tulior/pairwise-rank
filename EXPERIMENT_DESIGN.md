@@ -363,6 +363,79 @@ convert free text into a verdict.
 
 ---
 
+## 17. Matched ablation before interpreting composite winners
+
+An omnibus ranking tells you whether a composite candidate works.
+It does not tell you which component of the candidate caused the result.
+
+Suppose two candidates differ in both a prefix and a suffix:
+
+```
+
+A + X
+B + Y
+
+```
+
+If `B + Y` wins, the result does not identify an effect for `B` or `Y`.
+
+Possible explanations include:
+
+- `B` helps and `Y` helps
+- `B` helps while `Y` hurts
+- `Y` helps while `B` hurts
+- an interaction between `B` and `Y` matters
+- neither isolated component reproduces the omnibus result
+
+Global ranking identifies the performance of complete alternatives.
+It does not decompose them.
+
+To estimate the effect of a primitive, hold the surrounding context fixed:
+
+```
+
+A + X  vs  B + X
+A + Y  vs  B + Y
+
+```
+
+When practical, repeat the matched contrast across more than one surrounding
+context. This distinguishes a stable primitive effect from a context-specific
+interaction.
+
+Use counterbalanced direct evidence as the primary report for these small
+matched experiments. A global ranking model is usually unnecessary for a
+two-candidate contrast.
+
+Reasoning traces may be audited afterward to investigate mechanism, but the
+audit taxonomy should not be added to the original judge request. Otherwise
+the mechanism analysis becomes another prompt intervention.
+
+A useful workflow is:
+
+```
+
+omnibus screen
+-> identify composite frontier
+-> decompose candidates into primitives
+-> matched contrasts
+-> post-hoc mechanism audit
+
+```
+
+Do not infer component effects by subtracting latent scores from an omnibus
+tournament. Those scores are global, field-relative quantities and generally
+confound all differences between the candidates.
+
+**Rule:** composite rankings answer "does this complete alternative work?"
+Matched ablations answer "what changes when this one primitive changes?"
+
+A composite may succeed despite a harmful component rather than because of it.
+Credit a primitive only when a comparison that isolates that primitive supports
+the claim.
+
+---
+
 These heuristics are written for pairwise-comparison tournaments
 in particular, but most generalize. The same trap appears in
 prompt engineering, A/B testing, and human-subject studies:

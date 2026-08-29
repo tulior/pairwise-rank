@@ -1,6 +1,6 @@
 """pairwise-rank: small tools for reproducible pairwise ranking.
 
-Architecture (v0.4):
+Architecture (v0.4.2):
     direct_summary   baseline / always (no model, raw W/L/T + tournament score)
     fit_btd          default probabilistic model (3-level Bradley-Terry-Davidson)
     fit_ordinal      optional / legacy (5-level ordered logit)
