@@ -434,10 +434,74 @@ A composite may succeed despite a harmful component rather than because of it.
 Credit a primitive only when a comparison that isolates that primitive supports
 the claim.
 
+## 18. Coarse-to-fine with sibling-incumbent retention
+
+When the tournament has both coarse stages (compare strategies by description)
+and fine stages (compare rendered artifacts), they are not equivalent.
+
+Coarse stages answer: "which strategy produces a better posterior under
+imagined execution?" The judge necessarily imagines a representative
+realization. The dominant strategy tends to absorb a category-level abstraction
+advantage — the parent "transit" can sound good because the judge imagines the
+best member of the parent.
+
+Fine stages answer: "which artifact produces a better posterior as encountered?"
+The judge cannot abstract away the actual image. Incidental properties of the
+specific artifact (crop, weather, signage, country, time of day) become
+ineliminable part of the comparison.
+
+These are different questions. The coarse stage is a category experiment.
+The fine stage is an artifact-selection experiment.
+
+The transition is delicate. Two failure modes:
+
+1. **Retain the abstract parent in the fine stage.** A parent category that
+   won the coarse stage can continue to "sound good" at the fine stage because
+   the judge imagines a particular member rather than evaluating a specific
+   artifact. The parent effectively still has the abstraction advantage.
+
+   The fix is to retain a *concrete sibling incumbent* from the strongest
+   alternative branch, not the abstract parent. The sibling is a specific
+   real artifact the judge cannot re-imagine.
+
+2. **Treat a fine-stage winner as a category claim.** "Image X won" is not
+   "category Y is the best motif." The semantic hierarchy gets you to a
+   useful image search distribution. The fine stage then selects among
+   those artifacts. Image-level and category-level inferences do not
+   transfer; the next category in the same logical role may select a
+   different image for incidental reasons (lighting, weather, the way a
+   particular photographer cropped).
+
+   Report fine-stage winners as "this particular artifact won" and refuse
+   to generalize.
+
+A useful workflow:
+
+```
+coarse screen (descriptions, K=1)
+-> identify composite frontier
+-> drill within winning branch
+   with sibling incumbent from strongest rival branch
+-> lockdown (concrete artifacts, K=5)
+-> image selection is not a category experiment; stop
+```
+
+At the fine stage, also keep `<NO FIELD>` (or its equivalent control)
+alive as long as it has not been clearly dominated. Decomposition sanity
+checks whether the parent is genuinely preferred or merely sounds
+preferred against thin alternatives.
+
+In fine stages, incidentally contaminated images — a rainbow that pulls
+"pastoral", a council-estate facade that pulls "British working class",
+loud commercial signage — are not "merely imperfect realizations". The
+fine stage is image selection. Incidental properties of the image are
+the experiment. Accept them, swap them, or drop the slot. Do not average
+them out.
+
 ---
 
 These heuristics are written for pairwise-comparison tournaments
 in particular, but most generalize. The same trap appears in
 prompt engineering, A/B testing, and human-subject studies:
-optimize the construct first, then optimize within it, then
+optimize the construct first, optimize within it, then
 stop.
