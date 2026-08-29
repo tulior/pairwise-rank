@@ -209,6 +209,12 @@ See `tests/test_recovery.py` for the 5-level recovery test.
 - `sigma_theta`: posterior of the scale of the global strengths.
 - `tie_parameter`: `eta_tie` and `nu` posterior summaries.
 - `verdict_distribution_btd`: collapsed 3-level counts.
+- `divergences`, `max_rhat`, `min_ess_bulk`, `min_ess_tail`:
+  sampler health from the post-warmup draws. `divergences` is the
+  number of divergent transitions across all chains; the other three
+  are arviz-computed convergence diagnostics over `theta`,
+  `sigma_theta`, `eta_tie`, `beta_right`. A healthy fit has
+  `max_rhat < 1.01` and ESS > ~400.
 - `position_neutral`: whether `beta_right` was forced to zero in
   the predictions.
 
@@ -230,6 +236,30 @@ Interpretation:
   full posterior summary.
 - Repeats are separate observations. The model is not given
   knowledge of within-cell correlation.
+
+## Per-cell (orientation-aware) predictions
+
+`summarize_btd` reports per-pair likelihood probabilities averaged
+across orientations. For orientation-aware audit tables, debugging
+pairwise disagreements, or per-row prediction tables, use
+`predict_btd`:
+
+```python
+from pairwise_rank import predict_btd, fit_btd, load_observations_jsonl
+
+result = fit_btd(load_observations_jsonl("observations.jsonl"))
+preds = predict_btd(result, observations, position_neutral=True)
+# preds is a list of dict, one per observation (in input order):
+#   {"left", "right", "repeat", "verdict",
+#    "p_left_wins", "p_tie", "p_right_wins"}
+# p_left_wins + p_tie + p_right_wins = 1.0
+```
+
+`predict_btd` is the per-cell counterpart of the per-unordered-pair
+averaging inside `summarize_btd`. It is the right tool when the
+question is "what does the model predict for this specific
+(left, right) row?" rather than "what does the model predict for
+this unordered pair on average?".
 
 ## Diagnostics
 

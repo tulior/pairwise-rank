@@ -38,7 +38,7 @@ from .protocol import (
     load_observations_jsonl,
 )
 from .model import fit, fit_ordinal, summarize, posterior_predictive_check, FitResult
-from .btd import fit_btd, summarize_btd, direct_summary, BTDFitResult
+from .btd import fit_btd, summarize_btd, direct_summary, predict_btd, BTDFitResult
 from .report import three_view_report, print_three_view
 
 __all__ = [
@@ -64,6 +64,7 @@ __all__ = [
     "fit",                # DEPRECATED alias for fit_ordinal
     "summarize",          # works for both models (signature-compatible)
     "summarize_btd",
+    "predict_btd",        # per-cell (orientation-aware) BTD likelihood
     "posterior_predictive_check",
     "FitResult",
     "BTDFitResult",

@@ -126,6 +126,10 @@ class BTDFitResult:
     n: int
     item_ids: list[str]
     config: dict = field(default_factory=dict)
+    divergences: int = 0
+    """Number of divergent transitions post-warmup across all chains.
+    Stored on the result so callers do not need to reach into
+    ``idata.sample_stats`` to check sampler health."""
 
     @property
     def theta_draws(self) -> np.ndarray:
@@ -236,10 +240,21 @@ def fit_btd(
             progressbar=False,
         )
 
+    # Divergences are a sampler health indicator. We expose the count
+    # both on the BTDFitResult dataclass and in the summarize_btd
+    # output so callers do not have to reach into idata directly.
+    try:
+        n_divergences = int(
+            idata.sample_stats["diverging"].sum().item()
+        )
+    except (KeyError, AttributeError):
+        n_divergences = 0
+
     return BTDFitResult(
         idata=idata,
         n=n,
         item_ids=list(item_ids),
+        divergences=n_divergences,
         config={
             "draws": draws, "tune": tune, "chains": chains,
             "target_accept": target_accept, "seed": seed,
@@ -403,6 +418,31 @@ def summarize_btd(
         },
         "position_neutral": bool(position_neutral),
     }
+
+    # Sampler diagnostics. divergences is the count of divergent
+    # transitions across all chains. rhat, ess_bulk, ess_tail are
+    # max/min across theta, sigma_theta, eta_tie, beta_right — the
+    # scalar parameters plus the per-item theta. A healthy fit has
+    # rhat < 1.01 and ess_bulk / ess_tail > ~400. Divergences are
+    # fit failures, not cosmetic caveats.
+    out["divergences"] = int(getattr(result, "divergences", 0))
+    try:
+        diag_summary = az.summary(
+            result.idata,
+            var_names=["theta", "sigma_theta", "eta_tie", "beta_right"],
+            hdi_prob=hdi_prob,
+        )
+        out["max_rhat"] = float(diag_summary["r_hat"].max())
+        out["min_ess_bulk"] = float(diag_summary["ess_bulk"].min())
+        out["min_ess_tail"] = float(diag_summary["ess_tail"].min())
+    except Exception:
+        # If arviz summary fails for any reason, fall back to None
+        # rather than crash the whole summarize call. The values
+        # remain inspectable via result.idata.
+        out["max_rhat"] = None
+        out["min_ess_bulk"] = None
+        out["min_ess_tail"] = None
+
     if observations is not None:
         out["verdict_distribution_btd"] = _btd_verdict_counts(observations)
     return out
@@ -420,6 +460,109 @@ def _btd_verdict_counts(observations) -> dict[str, int]:
             out["tie"] += 1
         else:
             out["right_wins"] += 1
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Per-cell (orientation-aware) BTD likelihood predictions
+# ----------------------------------------------------------------------------
+
+def predict_btd(
+    result: BTDFitResult,
+    observations,
+    position_neutral: bool = False,
+) -> list[dict]:
+    """Orientation-aware per-cell BTD likelihood probabilities.
+
+    For each observation in ``observations``, return one dict with the
+    BTD likelihood probabilities of LEFT wins / TIE / RIGHT wins,
+    averaged over posterior draws. This is the per-cell counterpart
+    of the per-unordered-pair averaging inside ``summarize_btd``.
+
+    Use this when you need to know what the model predicts for a
+    specific orientation (e.g. audit tables, debugging pairwise
+    disagreements, or comparing the same unordered pair at its two
+    orientations separately).
+
+    Parameters
+    ----------
+    result:
+        A ``BTDFitResult`` returned by ``fit_btd``.
+    observations:
+        An iterable of ``Observation`` (or any object with
+        ``.left``, ``.right``, ``.verdict``, ``.repeat``). Rows with
+        empty verdicts are skipped.
+    position_neutral:
+        If True, the predictions use ``beta_right = 0``. The reported
+        ``beta_right_mean`` and HDI in ``summarize_btd`` still come
+        from the original posterior; only the predictions are forced
+        neutral.
+
+    Returns
+    -------
+    list of dict, one per observation (in input order). Each dict has:
+
+        {
+          "left": str,
+          "right": str,
+          "repeat": int,
+          "verdict": str,                   # input verdict, may be ""
+          "p_left_wins": float,             # P(LEFT wins) under BTD, posterior mean
+          "p_tie": float,                   # P(TIE) under BTD, posterior mean
+          "p_right_wins": float,            # P(RIGHT wins) under BTD, posterior mean
+        }
+
+    Invariants:
+
+        p_left_wins + p_tie + p_right_wins = 1.0  (up to float precision)
+        Items not in result.item_ids raise ValueError.
+        Legacy 5-level verdicts in the input are accepted; they are
+        collapsed to 3-level internally for the fit but the input
+        verdict string is preserved in the output.
+    """
+    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+    theta = result.theta_draws
+    beta_draws = (
+        np.zeros_like(result.beta_right_draws)
+        if position_neutral
+        else result.beta_right_draws
+    )
+    nu = result.nu_draws
+
+    out: list[dict] = []
+    for o in observations:
+        if o.left not in item_to_idx:
+            raise ValueError(
+                f"item {o.left!r} not in fit.item_ids {result.item_ids!r}"
+            )
+        if o.right not in item_to_idx:
+            raise ValueError(
+                f"item {o.right!r} not in fit.item_ids {result.item_ids!r}"
+            )
+        if not o.verdict:
+            continue
+        i = item_to_idx[o.left]
+        j = item_to_idx[o.right]
+        log_pi = theta[:, j] + beta_draws   # right slot
+        log_pj = theta[:, i]                # left slot
+        log_d = 0.5 * (log_pi + log_pj)
+        a = log_pj
+        b = log_d + np.log(nu)
+        c = log_pi
+        m = np.maximum(np.maximum(a, b), c)
+        ea = np.exp(a - m)
+        eb = np.exp(b - m)
+        ec = np.exp(c - m)
+        Z = ea + eb + ec
+        out.append({
+            "left": o.left,
+            "right": o.right,
+            "repeat": o.repeat,
+            "verdict": o.verdict,
+            "p_left_wins": float((ea / Z).mean()),
+            "p_tie": float((eb / Z).mean()),
+            "p_right_wins": float((ec / Z).mean()),
+        })
     return out
 
 
