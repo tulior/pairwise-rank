@@ -267,6 +267,100 @@ where the winner is chosen. If the audit says the construct
 is sound, stop. If the audit says the construct is broken,
 fix the construct, not the ranking.
 
+## 16. Tool metadata is part of the rubric
+
+When the judge is asked to commit its answer via a function
+call, the function schema sits immediately around the act of
+commitment. The model reads:
+
+- the function **name**
+- the function **description**
+- the parameter **name** and **description**
+- the parameter **enum**
+
+These are not implementation details; they are part of the
+effective rubric. The model commits its answer in the
+language of the schema, not the language of the prompt body.
+
+Concretely, the difference between these two schemas is not
+cosmetic:
+
+```
+name: record_preference
+description: "Record the pairwise bio preference as a 3-level
+             ordinal vote."
+
+name: record_posterior_comparison
+description: "Record which bio produces the better TPOT-native
+             posterior about the person behind the account. Use
+             TIE when neither bio produces a materially better
+             posterior."
+```
+
+The first quietly reframes the task from poster inference
+into subjective preference, and "ordinal vote" adds
+irrelevant statistical language. The second restates the
+actual estimand and closes the semantics of TIE.
+
+Three rules for the schema:
+
+1. **Name the function as a passive recording, not an active
+   choice.** The model has already done the judging; the tool
+   merely records the result. `record_X` keeps the prompt and
+   the tool in the same conceptual basin. Active verbs
+   (`choose_better_bio`, `select_best_profile`, `rank_bios`,
+   `evaluate_profile`) subtly push toward decisiveness and
+   against TIE.
+2. **Name the parameter after the decision variable, not the
+   storage form.** `verdict` is fine; `ordinal_vote`,
+   `left_wins`, `bio_score`, `winner` are not. The model sees
+   the parameter name when committing the answer.
+3. **Make TIE a first-class option in the description.** Many
+   models default to picking a side unless the schema tells
+   them TIE is normal. Phrases like "Use TIE when neither X
+   produces a materially better Y" raise the TIE rate
+   legitimately without changing the question.
+
+Tempting names to avoid:
+
+| name | failure mode |
+|---|---|
+| `record_preference` | too aesthetic / subjective |
+| `record_bio_preference` | frames "which bio do I like" |
+| `choose_better_bio` | suppresses TIE |
+| `select_best_profile` | implies a winner must exist |
+| `record_ordinal_vote` | statistical implementation leaks into judge task |
+| `evaluate_profile` | too broad |
+| `record_tpot_fit` | turns target into scene-fit, not person posterior |
+| `record_authenticity` | proxy capture |
+
+The lexical path at the end of the prompt should match the
+function schema:
+
+```
+better TPOT-native posterior
+    ↓
+record_posterior_comparison
+    ↓
+LEFT / TIE / RIGHT
+```
+
+The final few tokens of the prompt, the function name, and
+the function description should be inside the same
+conceptual basin. A clean function name makes the prompt's
+last line shorter and more direct, and a direct last line
+makes the function name easier to choose.
+
+A separate consequence: the documented `tool_choice` for
+the Responses API is `"none"` or `"auto"`, not a
+named-function-forcing object. With a single tool defined
+and the prompt explicitly asking the model to call it,
+`"auto"` normally produces the call, but this is not an
+API-level guarantee. The runner must enforce the protocol
+client-side: a completed response without exactly one valid
+function call is a malformed judgment, retry it. Do not
+convert free text into a verdict.
+
 ---
 
 These heuristics are written for pairwise-comparison tournaments
