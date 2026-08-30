@@ -126,10 +126,13 @@ class BTDFitResult:
     n: int
     item_ids: list[str]
     config: dict = field(default_factory=dict)
-    divergences: int = 0
+    divergences: int | None = None
     """Number of divergent transitions post-warmup across all chains.
     Stored on the result so callers do not need to reach into
-    ``idata.sample_stats`` to check sampler health."""
+    ``idata.sample_stats`` to check sampler health. ``None`` means
+    the count could not be read (e.g. the sampler backend does not
+    report divergences) and the fit should be treated as
+    **unverified for geometry**, not as "0 divergences = healthy"."""
 
     @property
     def theta_draws(self) -> np.ndarray:
@@ -243,12 +246,16 @@ def fit_btd(
     # Divergences are a sampler health indicator. We expose the count
     # both on the BTDFitResult dataclass and in the summarize_btd
     # output so callers do not have to reach into idata directly.
+    # The default for "could not be read" is None, NOT 0: a
+    # missing or unrecognised divergences field means we cannot
+    # certify sampler geometry, and reporting 0 would make a
+    # broken or misconfigured fit look healthy.
     try:
-        n_divergences = int(
+        n_divergences: int | None = int(
             idata.sample_stats["diverging"].sum().item()
         )
-    except (KeyError, AttributeError):
-        n_divergences = 0
+    except (KeyError, AttributeError, TypeError):
+        n_divergences = None
 
     return BTDFitResult(
         idata=idata,
@@ -420,12 +427,16 @@ def summarize_btd(
     }
 
     # Sampler diagnostics. divergences is the count of divergent
-    # transitions across all chains. rhat, ess_bulk, ess_tail are
-    # max/min across theta, sigma_theta, eta_tie, beta_right — the
-    # scalar parameters plus the per-item theta. A healthy fit has
-    # rhat < 1.01 and ess_bulk / ess_tail > ~400. Divergences are
-    # fit failures, not cosmetic caveats.
-    out["divergences"] = int(getattr(result, "divergences", 0))
+    # transitions across all chains, or None if the count could not
+    # be read (in which case the fit should be treated as
+    # unverified for geometry, NOT as "0 divergences = healthy").
+    # rhat, ess_bulk, ess_tail are max/min across theta,
+    # sigma_theta, eta_tie, beta_right — the scalar parameters
+    # plus the per-item theta. A healthy fit has rhat < 1.01 and
+    # ess_bulk / ess_tail > ~400. Divergences are fit failures,
+    # not cosmetic caveats. A None value is a red flag, not a
+    # pass.
+    out["divergences"] = getattr(result, "divergences", None)
     try:
         diag_summary = az.summary(
             result.idata,
