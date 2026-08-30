@@ -299,8 +299,4 @@ def test_5level_data_on_disk_loads_fine():
     assert result.n == 2
 
 
-# 23. Legacy 5-level fit_ordinal and the deprecated fit alias were
-# removed in v0.5. The only supported inference path is BTD on
-# 3-level verdicts. Legacy STRONG observations are accepted on
-# input by run_tournament(verdict_levels=VERDICT_LEVELS_5) and
-# collapsed to ordinary wins/losses by fit_btd internally.
+# 23. M0 / fit_ordinal was removed; BTD is the only inference path.

@@ -226,30 +226,37 @@ misspecification, not non-transitivity.
 
 ## 7. Testing
 
-The full test suite is 85 tests across four files:
+The full test suite runs the four statistical files plus two
+provider files:
 
 ```
-tests/test_btd.py
-tests/test_btd_predict.py
-tests/test_protocol.py
-tests/test_v04.py
+tests/test_btd.py             (BTD model invariants, vectorized helpers)
+tests/test_btd_predict.py    (per-cell BTD likelihood predictions)
+tests/test_protocol.py        (schedule, dedup, verdict collapse, JSONL)
+tests/test_v04.py             (default 3-level + legacy 5-level collapse)
+tests/test_providers/test_base.py      (connector base types)
+tests/test_providers/test_MiniMax.py   (MiniMax connector contract)
 ```
 
-In execution-time-constrained environments, run them in 4
-sequential batches of approximately 2 minutes each. The
-expected outcome is 85 / 85 passing.
+In execution-time-constrained environments, run the four
+statistical files in 4 sequential batches of approximately 2
+minutes each. Provider tests are fast (<10 s total) and can
+be run in a single command at any time.
 
 ```
 PYTHONPATH=src pytest tests/test_btd.py
 PYTHONPATH=src pytest tests/test_btd_predict.py
 PYTHONPATH=src pytest tests/test_protocol.py
 PYTHONPATH=src pytest tests/test_v04.py
+PYTHONPATH=src pytest tests/test_providers
 ```
 
 PyMC sampling dominates wall time. Do not parallelize across
 files; PyMC already parallelizes chains internally.
 
-Provider tests (`tests/test_providers/`) mock the HTTP layer
+Provider tests mock the HTTP layer
+(`pairwise_rank.providers.MiniMax.MiniMaxJudge` accepts a
+`http_post=...` constructor argument for test injection)
 and do not require network access. Live provider integration
 tests are opt-in and **not** part of the default suite.
 

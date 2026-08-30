@@ -17,8 +17,6 @@ the v0.4 docs explicitly call out:
   - beta_right > 0 favors the right slot
   - P(best) is computed jointly from posterior draws
   - position-neutral predictions set beta_right = 0
-  - existing ordered-model tests remain green (covered in
-    tests/test_model.py and tests/test_recovery.py)
 """
 from __future__ import annotations
 
