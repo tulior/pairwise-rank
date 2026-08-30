@@ -1010,3 +1010,221 @@ These heuristics are written for pairwise-comparison tournaments
 in particular, but most generalize. The same trap appears in
 prompt engineering, A/B testing, and human-subject studies:
 optimize the construct first, optimize within it, then stop.
+
+## 20. Scaling boundary: model vs design
+
+The modeling layer and the experimental-design layer are
+different problems. Mixing them is a frequent source of
+unforced complexity.
+
+```
+Do not increase model complexity to solve an experimental-design problem.
+```
+
+The principle is one-directional. A scaling problem in the
+design layer (the candidate set is too large, the comparison
+budget is bounded, the decision is only over the top-k) is
+addressed by changing the design. It is not addressed by
+replacing the ranking likelihood with a more expressive
+model that happens to also reduce something. A misspecification
+problem in the model layer (the likelihood does not match the
+data generating process) is addressed by changing the model.
+It is not addressed by adding a richer likelihood to absorb
+design choices that should have been made explicitly.
+
+### Likelihood vs design
+
+```
+likelihood pools evidence
+design buys evidence
+```
+
+Davidson remains the ranking likelihood. Comparison selection
+is a separate experimental-design problem. The two layers do
+not share a budget and do not share a vocabulary: the
+likelihood is asked to be honest about what the data already
+say, and the design is asked to spend the next comparison
+where it earns the most decision-relevant information.
+
+For small candidate sets, complete counterbalanced round robin
+remains the default because `O(N^2)` is cheap when `N` is
+small. There is no acquisition problem and no reason to add
+acquisition machinery.
+
+A practical engineering boundary, not a theorem:
+
+```
+N ~= 5-8:
+    complete counterbalanced round robin
+    no adaptive pairing machinery
+
+larger fields, roughly N >= 30:
+    consider sparse initialization + adaptive pair selection
+    as a separate design layer consuming the Davidson posterior
+```
+
+The `N >= 30` figure is an engineering boundary where
+adaptive design may start paying for its added complexity.
+It is not a hard cutoff. The actual transition depends on
+the comparison cost, the decision target, the judge latency,
+and the budget. The boundary is reported so the simpler
+default is not abandoned prematurely.
+
+### Three decision modes
+
+The acquisition objective depends on the decision target.
+The selector, if it exists, must know which target it is
+serving.
+
+1. **Small N, full ranking.** Complete counterbalanced round
+   robin. Every pair, both orientations, a small K. The
+   posterior does the work. There is no acquisition problem.
+
+2. **Large N, winner / top-k selection.** The decision target
+   is a small set of candidates at the top. The design is
+   aimed at that target, not at global rank accuracy.
+
+   ```
+   sparse connected initialization
+   -> Davidson fit
+   -> identify uncertain top-k frontier
+   -> compare informative pairs near that frontier
+   -> refit in batches
+   -> eliminate clearly dominated candidates
+   -> stop when decision uncertainty is sufficiently low
+   ```
+
+3. **Large N, accurate full ranking.** The decision target is
+   the ordering of every candidate. The design still has to
+   cover the field, but it does not have to cover it uniformly.
+
+   ```
+   sparse balanced comparison graph
+   -> adaptive comparisons aimed at global rank uncertainty
+   ```
+
+The acquisition objective is different in modes 2 and 3. For
+full ranking (mode 3), close latent strengths can be informative:
+
+```
+|theta_i - theta_j| small
+```
+
+For winner / top-k selection (mode 2), globally choosing the
+closest theta pair is wasteful because it may spend budget
+distinguishing irrelevant low-ranked candidates. For top-k
+selection, prioritize comparisons where both are true:
+
+```
+P(theta_i > theta_j) is near 0.5
+```
+
+and
+
+```
+one or both candidates have meaningful uncertainty about top-k membership
+```
+
+The budget should be spent near the decision boundary, not
+uniformly across all ranks.
+
+### Safeguards
+
+1. **Connectivity first.** Adaptive selection must begin from
+   a connected sparse design. A practical starting point for
+   larger fields is approximately degree 4–6 per item,
+   subject to the actual experiment. The purpose is
+   identifiability and avoiding starvation of poorly sampled
+   candidates. This is a heuristic. Do not hard-code the
+   degree into any API.
+
+2. **Batch adaptation.** Prefer batches of comparisons rather
+   than refitting after every single judgment. A rough
+   operational scale such as 10–30 new comparison cells per
+   batch is reasonable. The number is a heuristic, not a
+   statistical requirement, and depends on judge latency and
+   budget cadence.
+
+3. **Decision confidence is not ranking confidence.** A
+   tournament can have high confidence in the winner while
+   retaining substantial uncertainty in the ordering of
+   irrelevant lower-ranked candidates. If the decision target
+   is winner or top-k, do not continue sampling merely to
+   stabilize the entire ranking. The acquisition objective is
+   the decision, not the full posterior.
+
+4. **Bounded stopping.** Stopping rules must include:
+
+   ```
+   decision threshold
+   stability window
+   maximum budget
+   ```
+
+   For example, winner selection might stop when:
+
+   ```
+   P(best = i) > threshold
+   ```
+
+   and the selected winner remains stable across consecutive
+   batches. If the threshold is never reached because two
+   candidates are genuinely nearly indistinguishable, stop at
+   the declared budget and report the posterior uncertainty.
+   Do not manufacture certainty.
+
+### Architectural separation
+
+Use this conceptual decomposition:
+
+```
+judge | Davidson fitter | selector
+```
+
+These are separate responsibilities. The fitter consumes
+observations and estimates the Davidson posterior; it does not
+know why a pair was selected. The selector consumes posterior
+summaries and chooses which comparison to buy next; it does
+not own another ranking likelihood. The judge / protocol
+produces the observations and remains independent of inference
+and acquisition policy.
+
+Adaptive selection, if ever implemented, should be a thin
+separate module rather than logic embedded into `fit_btd`.
+The fitter does not grow a selector; the selector does not
+grow a likelihood.
+
+### Cost argument
+
+Round robin scales quadratically in the number of candidates.
+The way to reduce comparison cost at larger N is primarily
+to evaluate fewer, more informative pairs. A more expressive
+ranking model generally introduces additional parameters and
+does not itself reduce the number of observations required
+for arbitrary unrelated candidates.
+
+Feature-based preference models can reduce sample requirements
+only when candidates share a feature representation that
+allows generalization to unseen items. That is a different
+problem from ranking a finite set of unrelated candidates. Do
+not import the machinery of one into the other.
+
+### Frozen modeling layer (current use case)
+
+For the current small-N use case, the statistical modeling
+layer is frozen at:
+
+```
+direct counterbalanced W/L/T evidence
++ Bayesian Davidson
++ order effect
+```
+
+Do not introduce adaptive selection or richer ranking models
+until there is an actual scaling or model-misspecification
+problem demonstrated by data. If larger-N use becomes real,
+solve comparison allocation first before reconsidering the
+likelihood. The model-falsification audit in
+`experiments/model_falsification/MODEL_FALSIFICATION.md` is
+the standing evidence that the richer models considered so
+far do not earn their complexity at the project scale.
