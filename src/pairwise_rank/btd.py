@@ -114,6 +114,96 @@ def _btd_code(verdict: str) -> int:
     raise ValueError(f"unknown verdict: {verdict!r}")
 
 
+# ----------------------------------------------------------------------------
+# Vectorized summary helpers
+# ----------------------------------------------------------------------------
+#
+# These helpers own the small amounts of math that were previously
+# inlined as Python loops in summarize_btd and predict_btd. They are
+# not generic abstractions; they exist to:
+#   (a) keep one canonical formula for the Davidson logits, and
+#   (b) replace O(n) and O(n^2) per-item Python loops over the
+#       posterior draws with vectorized NumPy reductions.
+#
+# Shapes:
+#   theta              (S, n)   flat posterior strengths
+#   beta_right_draws   (S,)     flat position-effect draws
+#   log_nu             (S,)     log tie-weight draws
+#   theta_left, theta_right  (S,) or (S, n_obs)  -- broadcastable
+#   beta, log_nu              (S,)                -- broadcastable
+
+def _rank_pos(theta: np.ndarray) -> np.ndarray:
+    """Return (n, S) 0-indexed rank positions: rank_pos[i, s] is
+    the position of item i in draw s when theta is sorted
+    descending. Uses stable argsort tie-breaking (first occurrence
+    wins, matching the pre-vectorization contract).
+    """
+    order = np.argsort(-theta, axis=1)            # (S, n)
+    rank_pos = np.empty_like(order)
+    S = order.shape[0]
+    rank_pos[np.arange(S)[:, None], order] = np.arange(order.shape[1])
+    return rank_pos.T                             # (n, S)
+
+
+def _p_best(theta: np.ndarray) -> np.ndarray:
+    """Return (n,) P(best) using the same argmax tie-breaking as
+    the pre-vectorization code: each draw credits exactly one
+    item (the first-argmax item on ties). Equivalent to
+    ``(np.argmax(theta, axis=1) == i).mean()`` per item, but
+    vectorized via bincount so we do not loop over n.
+    """
+    argmax_items = np.argmax(theta, axis=1)         # (S,)
+    n = theta.shape[1]
+    counts = np.bincount(argmax_items, minlength=n)
+    return counts / theta.shape[0]
+
+
+def _pairwise_gt_means(theta: np.ndarray) -> np.ndarray:
+    """Return (n, n) matrix of ``mean(theta_s[i] > theta_s[j])``
+    across the posterior. Diagonal is set to NaN to match the
+    pre-vectorization contract (the pre-vectorization code used
+    ``np.full((n, n), np.nan)`` and never wrote the diagonal).
+    """
+    pairwise = (theta[:, :, None] > theta[:, None, :]).mean(axis=0)
+    np.fill_diagonal(pairwise, np.nan)
+    return pairwise
+
+
+def _davidson_probs(
+    theta_left: np.ndarray,
+    theta_right: np.ndarray,
+    beta: np.ndarray,
+    log_nu: np.ndarray,
+) -> np.ndarray:
+    """Compute BTD probabilities (LEFT, TIE, RIGHT) for any
+    broadcastable shape of (theta_left, theta_right). The three
+    logits are the canonical Davidson equation:
+
+        log p_left  = theta_left
+        log p_tie   = log_nu + 0.5 * (theta_left + theta_right + beta)
+        log p_right = theta_right + beta
+
+    Returns the softmax-normalized probabilities along the last
+    axis. ``beta`` and ``log_nu`` are (S,) and are aligned with
+    the last axis of (theta_left, theta_right); when those are
+    2D (S, n) or (S, n_obs) the broadcast works because beta is
+    reshaped to (S, 1). This is the only place in the production
+    source where the Davidson logits are constructed, so the fit
+    and the predict path cannot drift apart.
+    """
+    # Align beta / log_nu with the last axis of the per-item
+    # strength arrays so the (S,) shape broadcasts cleanly against
+    # (S,) and (S, n_obs) inputs.
+    if theta_left.ndim >= 2:
+        beta = beta.reshape((-1,) + (1,) * (theta_left.ndim - 1))
+        log_nu = log_nu.reshape((-1,) + (1,) * (theta_left.ndim - 1))
+    log_pi = theta_right + beta
+    log_pj = theta_left
+    log_d = 0.5 * (log_pi + log_pj)
+    logits = np.stack([log_pj, log_d + log_nu, log_pi], axis=-1)
+    return softmax(logits, axis=-1)
+
+
 def _strong_count(obs: list[Observation]) -> dict[str, int]:
     n_left_strong = sum(1 for o in obs if o.verdict == "LEFT_STRONG")
     n_right_strong = sum(1 for o in obs if o.verdict == "RIGHT_STRONG")
@@ -313,21 +403,30 @@ def summarize_btd(
         summary including position effects. Set to ``True`` when
         using the predictions to rank or score items.
 
-    Keys mirror the M0 summarize() output where comparable, plus
-    ``eta_tie`` and ``nu`` for the tie-weight parameter. Pairwise
-    keys also include ``p_left_wins`` and ``p_right_wins`` from the
-    BTD likelihood directly (which already incorporate tie
-    probability).
+    Keys: per-item (theta_mean, theta_hdi, p_best, p_top2,
+    expected_rank), pairwise (p_i_gt_j, delta_mean, delta_hdi,
+    and BTD-likelihood p_left_wins / p_tie / p_right_wins when
+    observations are provided), position_effect, sigma_theta,
+    tie_parameter (eta_tie and nu), sampler diagnostics.
     """
-    theta = result.theta_draws
+    # Pull all posterior arrays once.
+    theta = result.theta_draws                  # (S, n)
     S, n = theta.shape
-    beta = _position_neutral_beta(result.beta_right_draws, position_neutral)
+    beta_orig = result.beta_right_draws         # (S,)
+    beta = _position_neutral_beta(beta_orig, position_neutral)
+    eta_tie = result.eta_tie_draws              # (S,)
+    nu = result.nu_draws                        # (S,)
+    log_nu = np.log(nu)                         # (S,)
 
-    ranks = np.argsort(-theta, axis=1)
-    rank_pos = np.array([np.where(ranks == i)[1] for i in range(n)])
-    p_best = np.array([(np.argmax(theta, axis=1) == i).mean() for i in range(n)])
-    p_top2 = np.array([(rank_pos[i] <= 1).mean() for i in range(n)])
-    mean_rank = rank_pos.mean(axis=1) + 1
+    # Per-item rank / probability summaries (vectorized). The
+    # tie-breaking semantics match the pre-vectorization code:
+    # argsort is stable and argmax picks the first-occurrence on
+    # ties, so ``P(best)`` is the fraction of draws that credited
+    # each item via the per-draw argmax.
+    rank_pos = _rank_pos(theta)                 # (n, S), 0-indexed
+    p_best = _p_best(theta)                     # (n,)
+    p_top2 = (rank_pos <= 1).mean(axis=1)      # (n,)
+    mean_rank = rank_pos.mean(axis=1) + 1       # (n,), 1-indexed
 
     per_item = []
     for i in range(n):
@@ -341,50 +440,64 @@ def summarize_btd(
             "expected_rank": float(mean_rank[i]),
         })
 
-    # Pairwise from theta.
-    P = np.full((n, n), np.nan)
-    for i in range(n):
-        for j in range(i + 1, n):
-            P[i, j] = float((theta[:, i] > theta[:, j]).mean())
-            P[j, i] = 1.0 - P[i, j]
+    # Pairwise P(theta_i > theta_j) -- vectorized via broadcasting.
+    # Diagonal is set to NaN to match the pre-vectorization contract.
+    P = _pairwise_gt_means(theta)               # (n, n)
 
-    # Pairwise BTD likelihood probabilities (account for ties and
-    # the chosen beta_right, possibly forced to zero). The three
-    # logits are the same ones used by the fit; the categorical
-    # normalization is owned by ``scipy.special.softmax`` so the
-    # code below does not implement any custom log-softmax or
-    # max-shift trick.
-    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+    # Per-pair BTD likelihood probabilities. Vectorized across
+    # observations (and across the posterior draws) using the
+    # canonical Davidson logits; the per-pair aggregation is the
+    # only remaining Python loop and is over candidate pairs
+    # (O(n_obs), independent of S).
     pairwise_lh: dict = {}
     if observations is not None:
-        log_nu = np.log(result.nu_draws)
-        for o in observations:
-            i = item_to_idx[o.left]
-            j = item_to_idx[o.right]
-            log_pi = theta[:, j] + beta      # right slot
-            log_pj = theta[:, i]             # left slot
-            log_d = 0.5 * (log_pi + log_pj)  # geometric mean
-            logits = np.stack(
-                [log_pj, log_d + log_nu, log_pi], axis=1,
-            )                                # (S, 3)
-            probs = softmax(logits, axis=1)  # (S, 3)
-            p_left = float(probs[:, 0].mean())
-            p_tie = float(probs[:, 1].mean())
-            p_right = float(probs[:, 2].mean())
-            key = (i, j) if i < j else (j, i)
-            entry = pairwise_lh.setdefault(key, {
-                "sum_left": 0.0, "sum_tie": 0.0, "sum_right": 0.0, "n": 0,
-            })
-            entry["sum_left"] += p_left
-            entry["sum_tie"] += p_tie
-            entry["sum_right"] += p_right
-            entry["n"] += 1
-        for key, e in pairwise_lh.items():
-            n_obs_for_pair = e["n"]
-            pairwise_lh[key] = {
-                "p_left_wins_mean": e["sum_left"] / n_obs_for_pair,
-                "p_tie_mean": e["sum_tie"] / n_obs_for_pair,
-                "p_right_wins_mean": e["sum_right"] / n_obs_for_pair,
+        item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+        left_idx = np.array(
+            [item_to_idx[o.left] for o in observations], dtype=int,
+        )
+        right_idx = np.array(
+            [item_to_idx[o.right] for o in observations], dtype=int,
+        )
+        # (S, n_obs, 3) BTD probabilities for every observation.
+        obs_probs = _davidson_probs(
+            theta[:, left_idx], theta[:, right_idx], beta, log_nu,
+        )
+        obs_probs_mean = obs_probs.mean(axis=0)   # (n_obs, 3)
+        # Group observations by unordered pair. We sort the
+        # (left, right) pair tuples into canonical (min, max) order,
+        # then walk the sorted array and close each group on tuple
+        # change. This is O(n_obs log n_obs) for the sort and
+        # O(n_obs) for the walk; the only remaining Python loop in
+        # the per-pair block is over the number of distinct pairs
+        # in the observation set, not over posterior draws.
+        pair_left = np.minimum(left_idx, right_idx)
+        pair_right = np.maximum(left_idx, right_idx)
+        order = np.lexsort((pair_left, pair_right))
+        sorted_left = pair_left[order]
+        sorted_right = pair_right[order]
+        sorted_probs = obs_probs_mean[order]
+        prev_pair: tuple[int, int] | None = None
+        accum = np.zeros(3)
+        count = 0
+        for k in range(len(observations)):
+            pair = (int(sorted_left[k]), int(sorted_right[k]))
+            if pair != prev_pair:
+                if prev_pair is not None:
+                    pairwise_lh[prev_pair] = {
+                        "p_left_wins_mean": float(accum[0] / count),
+                        "p_tie_mean": float(accum[1] / count),
+                        "p_right_wins_mean": float(accum[2] / count),
+                    }
+                prev_pair = pair
+                accum[:] = 0.0
+                count = 0
+            accum += sorted_probs[k]
+            count += 1
+        if prev_pair is not None:
+            pairwise_lh[prev_pair] = {
+                "p_left_wins_mean": float(accum[0] / count),
+                "p_tie_mean": float(accum[1] / count),
+                "p_right_wins_mean": float(accum[2] / count),
             }
 
     pairwise = {}
@@ -405,13 +518,10 @@ def summarize_btd(
                 entry["p_right_wins"] = lh["p_right_wins_mean"]
             pairwise[key] = entry
 
-    beta_orig = result.beta_right_draws
     beta_hdi = az.hdi(beta_orig, hdi_prob=hdi_prob)
     sigma = result.sigma_theta_draws
     sigma_hdi = az.hdi(sigma, hdi_prob=hdi_prob)
-    eta_tie = result.eta_tie_draws
     eta_tie_hdi = az.hdi(eta_tie, hdi_prob=hdi_prob)
-    nu = result.nu_draws
     nu_hdi = az.hdi(nu, hdi_prob=hdi_prob)
 
     out = {
@@ -567,16 +677,11 @@ def predict_btd(
             continue
         i = item_to_idx[o.left]
         j = item_to_idx[o.right]
-        # Same three logits as the fit. Categorical normalization
-        # is owned by ``scipy.special.softmax``; no custom log-
-        # softmax or max-shift trick is implemented here.
-        log_pi = theta[:, j] + beta_draws   # right slot
-        log_pj = theta[:, i]                # left slot
-        log_d = 0.5 * (log_pi + log_pj)     # geometric mean
-        logits = np.stack(
-            [log_pj, log_d + log_nu, log_pi], axis=1,
-        )                                   # (S, 3)
-        probs = softmax(logits, axis=1)     # (S, 3)
+        # Same three logits as the fit, via the canonical helper.
+        # Categorical normalization is owned by scipy.special.softmax
+        # (inside _davidson_probs); no custom log-softmax or
+        # max-shift trick is implemented here.
+        probs = _davidson_probs(theta[:, i], theta[:, j], beta_draws, log_nu)
         out.append({
             "left": o.left,
             "right": o.right,
