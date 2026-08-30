@@ -111,6 +111,16 @@ The package does not provide a default prompt, judge, or LLM tool
 schema. Those are the caller's job. The package owns the schedule,
 the verdict vocabulary, and the model. Nothing else.
 
+For convenience, the package ships a thin MiniMax connector under
+`pairwise_rank.providers` that implements the standard
+`JudgeConnector` protocol and assembles the Responses-API request
+body for the project's primary use case. It uses the provider's
+default sampling behavior (no `temperature`, no `top_p`) and
+explicitly requests the maximum supported reasoning effort for
+the configured model. It is an optional convenience, not a
+provider framework. See `AGENTS.md` §9–§10 for the policy and
+for how to add another provider.
+
 ### Optional: storing reasoning traces
 
 A `judge_fn` can return either a `Verdict` string or a
@@ -264,6 +274,36 @@ characterize the comparison.
 
 For multi-candidate tournaments (≥5 items), use direct + BTD.
 Disagreement between the two is diagnostic, not a failure.
+
+## Provider connector (optional)
+
+`pairwise_rank.providers.MiniMax.MiniMaxJudge` is a thin
+stdlib-only connector for the MiniMax Responses API. It reads
+`$MINIMAX_API_KEY` (or `$M3_API_KEY` for backward compat) and
+returns a `Judgment` with provider / model / reasoning_effort
+metadata recorded for reproducibility.
+
+```python
+from pairwise_rank import run_tournament
+from pairwise_rank.providers import JudgmentRequest
+from pairwise_rank.providers.MiniMax import MiniMaxJudge
+
+judge = MiniMaxJudge()  # reads $MINIMAX_API_KEY
+def my_judge(left, right):
+    j = judge.judge(JudgmentRequest(
+        left=left, right=right,
+        instructions="<your construct prompt, verbatim>",
+    ))
+    return (j.verdict, j.reasoning)
+
+observations = run_tournament(candidates, my_judge, repeats=3)
+```
+
+The connector never sets `temperature`, `top_p`, `max_p`,
+`seed`, or any other sampling knob. It always sets
+`reasoning: {"effort": "high"}` to enable Adaptive Thinking
+for M3. The canonical internal judgment contract is fixed; the
+provider-specific parsing lives inside the connector module.
 
 ## See also
 
