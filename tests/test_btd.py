@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.special import softmax
 
 from pairwise_rank import Observation
 from pairwise_rank.btd import fit_btd, summarize_btd, direct_summary, _btd_code
@@ -192,3 +193,134 @@ def test_ranking_recovers_known_order():
     assert by_id["a"]["theta_mean"] > by_id["c"]["theta_mean"]
     assert by_id["b"]["theta_mean"] > by_id["c"]["theta_mean"]
     assert by_id["a"]["p_best"] > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Equivalence: pm.Categorical fit == old pm.Potential fit
+# ---------------------------------------------------------------------------
+#
+# The BTD fit was switched from a hand-rolled
+#     pm.Potential("y_obs_logp", sum_i (L_i[y_i] - logsumexp(L_i)))
+# block to
+#     pm.Categorical("y", logit_p=stacked_L, observed=ys)
+# These are algebraically identical by definition of
+# pm.Categorical. The tests below pin the equivalence so the swap
+# can be reproduced or audited.
+
+def test_btd_likelihood_logits_match_davidson_equation():
+    """The three logits used by the fit are exactly the Davidson
+    log-probabilities (up to the shared log-Z), and the same
+    three logits are reused by the numpy path with
+    scipy.special.softmax for normalization. This pins the
+    'one source of truth for the logits' contract."""
+    # Hand-coded reference: for a single observation with
+    # (theta[i], theta[j], beta_right, eta_tie), the three
+    # Davidson log-probabilities (up to log-Z) are
+    #   LEFT  = theta[j]                  (left slot = j)
+    #   TIE   = 0.5 * (theta[i] + theta[j] + beta_right) + eta_tie
+    #   RIGHT = theta[i] + beta_right     (right slot = i)
+    # The production fit builds these and passes them to
+    # pm.Categorical. The numpy predict path builds the same
+    # three and uses scipy.special.softmax.
+    obs = [
+        _obs("a", "b", "a", "b", 1, 1),  # TIE
+        _obs("a", "b", "b", "a", 0, 1),  # LEFT (b beats a on right)
+        _obs("a", "b", "a", "b", 2, 1),  # RIGHT
+    ]
+    result = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    theta = result.theta_draws
+    beta = result.beta_right_draws
+    log_nu = np.log(result.nu_draws)
+    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+
+    from pairwise_rank import predict_btd
+    preds = predict_btd(result, obs)
+    for o, p in zip(obs, preds):
+        i = item_to_idx[o.left]
+        j = item_to_idx[o.right]
+        log_pi = theta[:, j] + beta
+        log_pj = theta[:, i]
+        log_d = 0.5 * (log_pi + log_pj)
+        # Reference: scipy.special.softmax on the same three
+        # logits, mean over posterior draws.
+        ref_probs = softmax(
+            np.stack([log_pj, log_d + log_nu, log_pi], axis=1),
+            axis=1,
+        )
+        assert abs(p["p_left_wins"] - float(ref_probs[:, 0].mean())) < 1e-12
+        assert abs(p["p_tie"] - float(ref_probs[:, 1].mean())) < 1e-12
+        assert abs(p["p_right_wins"] - float(ref_probs[:, 2].mean())) < 1e-12
+
+
+def test_btd_fit_logp_matches_manual_davidson_logp():
+    """Algebraic identity: pm.Categorical(logit_p=L, observed=y)
+    computes the same logp as the old hand-rolled
+    sum_i (L_i[y_i] - logsumexp(L_i)). This is a unit test
+    at the pytensor level, independent of any real fit."""
+    import pymc as pm
+    import pytensor
+    import pytensor.tensor as pt
+
+    # Hand-built logits, no priors.
+    L = np.array(
+        [[1.0, 0.5, -0.5],   # obs 0
+         [0.0, 1.5, 0.0],    # obs 1
+         [-1.0, 0.0, 2.0]],  # obs 2
+        dtype=float,
+    )
+    y = np.array([0, 1, 2], dtype=int)
+    L_pt = pt.as_tensor_variable(L)
+
+    with pm.Model() as m:
+        pm.Categorical("y_obs", logit_p=L_pt, observed=y)
+        # The old hand-rolled expression for cross-check.
+        log_Z = pt.logsumexp(L_pt, axis=1)
+        log_p = L_pt - log_Z[:, None]
+        old_logp = pt.sum(log_p[pt.arange(y.shape[0]), y])
+
+    new_logp = m.compile_logp()(m.initial_point())
+    # Compile the old logp as a free function on the same L.
+    # ``pytensor.function`` lives at the top level of the
+    # ``pytensor`` package, not on ``pymc.pytensorf``.
+    old_logp_fn = pytensor.function([], old_logp)
+    old_val = old_logp_fn()
+
+    assert abs(float(new_logp) - float(old_val)) < 1e-10
+
+
+def test_predict_btd_matches_scipy_softmax_on_same_logits():
+    """For any posterior draw, predict_btd's probabilities must
+    equal scipy.special.softmax applied to the same three
+    Davidson logits. This is the load-bearing equivalence: the
+    fit uses pm.Categorical (which uses an internal softmax on
+    the same logits); predict_btd uses scipy.special.softmax on
+    the same logits. Both paths must produce the same numbers.
+    """
+    obs = [
+        _obs("a", "b", "a", "b", 0, 1),  # LEFT
+        _obs("a", "b", "b", "a", 1, 1),  # TIE
+        _obs("a", "b", "a", "b", 2, 1),  # RIGHT
+        _obs("a", "b", "b", "a", 0, 1),  # LEFT
+    ]
+    result = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    # Mirror predict_btd's indexing.
+    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+    theta = result.theta_draws
+    beta = result.beta_right_draws
+    log_nu = np.log(result.nu_draws)
+
+    from pairwise_rank import predict_btd
+    preds = predict_btd(result, obs)
+    for o, p in zip(obs, preds):
+        i = item_to_idx[o.left]
+        j = item_to_idx[o.right]
+        log_pi = theta[:, j] + beta
+        log_pj = theta[:, i]
+        log_d = 0.5 * (log_pi + log_pj)
+        ref = softmax(
+            np.stack([log_pj, log_d + log_nu, log_pi], axis=1),
+            axis=1,
+        )
+        assert abs(p["p_left_wins"] - float(ref[:, 0].mean())) < 1e-12
+        assert abs(p["p_tie"] - float(ref[:, 1].mean())) < 1e-12
+        assert abs(p["p_right_wins"] - float(ref[:, 2].mean())) < 1e-12

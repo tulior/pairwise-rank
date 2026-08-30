@@ -40,10 +40,15 @@ The three log-probabilities (up to a shared log-Z constant) are:
     log P(TIE)         = 0.5 * (theta[lefts] + theta[rights] + beta_right) + eta_tie
     log P(RIGHT wins)  = theta[rights] + beta_right
 
-A custom log-likelihood is added via ``pm.Potential`` rather than
-``pm.Categorical`` (the latter is not exposed on every pytensor
-build). The categorical log-prob is built by hand and accumulated
-with the observed codes.
+These three logits are stacked along the categorical axis and
+passed to ``pm.Categorical("y", logit_p=logits, observed=ys)``.
+PyMC's categorical primitive owns the softmax / logsumexp / observed
+log-prob accumulation, so the fit does not implement any custom
+log-softmax or normalization math. The same three logits are
+reused verbatim by ``predict_btd`` and the per-pair block in
+``summarize_btd``, where they are normalized with
+``scipy.special.softmax``. There is no second hand-rolled softmax
+site.
 
 # Backward compatibility
 
@@ -75,6 +80,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.special import softmax
 
 try:
     import pymc as pm
@@ -176,22 +182,27 @@ def _build_btd_model(
         beta_right = pm.Normal("beta_right", 0.0, 0.5)
         eta_tie = pm.Normal("eta_tie", 0.0, 1.0)
 
-        # Davidson likelihood in log space.
-        #   log lambda_i = theta[rights] + beta_right  (right slot)
-        #   log lambda_j = theta[lefts]                  (left slot)
-        #   log sqrt(lambda_i * lambda_j) = 0.5 * (log lambda_i + log lambda_j)
-        log_pi = theta[rights] + beta_right
-        log_pj = theta[lefts]
-        log_d = 0.5 * (log_pi + log_pj)
+        # Davidson likelihood logits. For each observation, the
+        # three log-probabilities (up to a shared log-Z) are
+        #
+        #   log P(LEFT wins)  = theta[lefts]
+        #   log P(TIE)        = 0.5 * (theta[lefts] + theta[rights] + beta_right) + eta_tie
+        #   log P(RIGHT wins) = theta[rights] + beta_right
+        #
+        # (right slot is the "i" in the Davidson lambda_i
+        # convention; beta_right is the right-slot position
+        # offset). The categorical normalization (softmax) is
+        # owned by ``pm.Categorical`` itself, so we do not
+        # implement a custom log-softmax here. The same three
+        # logits are reused verbatim by ``predict_btd`` and the
+        # per-pair block in ``summarize_btd``, where they are
+        # normalized with ``scipy.special.softmax``.
+        log_pi = theta[rights] + beta_right      # right slot
+        log_pj = theta[lefts]                    # left slot
+        log_d = 0.5 * (log_pi + log_pj)          # geometric mean
 
-        a = log_pj                              # log P(left wins)   (up to -log Z)
-        b = log_d + eta_tie                     # log P(tie)
-        c = log_pi                              # log P(right wins)
-
-        stacked = pt.stack([a, b, c], axis=1)
-        log_Z = pt.logsumexp(stacked, axis=1)
-        log_probs = stacked - log_Z[:, None]
-        pm.Potential("y_obs_logp", pt.sum(log_probs[np.arange(ys.shape[0]), ys]))
+        logits = pt.stack([log_pj, log_d + eta_tie, log_pi], axis=1)
+        pm.Categorical("y", logit_p=logits, observed=ys)
     return model
 
 
@@ -338,26 +349,28 @@ def summarize_btd(
             P[j, i] = 1.0 - P[i, j]
 
     # Pairwise BTD likelihood probabilities (account for ties and
-    # the chosen beta_right, possibly forced to zero).
+    # the chosen beta_right, possibly forced to zero). The three
+    # logits are the same ones used by the fit; the categorical
+    # normalization is owned by ``scipy.special.softmax`` so the
+    # code below does not implement any custom log-softmax or
+    # max-shift trick.
     item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
     pairwise_lh: dict = {}
     if observations is not None:
-        nu = result.nu_draws
+        log_nu = np.log(result.nu_draws)
         for o in observations:
             i = item_to_idx[o.left]
             j = item_to_idx[o.right]
             log_pi = theta[:, j] + beta      # right slot
             log_pj = theta[:, i]             # left slot
-            log_d = 0.5 * (log_pi + log_pj)
-            a = log_pj
-            b = log_d + np.log(nu)
-            c = log_pi
-            m = np.maximum(np.maximum(a, b), c)
-            ea, eb, ec = np.exp(a - m), np.exp(b - m), np.exp(c - m)
-            Z = ea + eb + ec
-            p_left = float((ea / Z).mean())
-            p_tie = float((eb / Z).mean())
-            p_right = float((ec / Z).mean())
+            log_d = 0.5 * (log_pi + log_pj)  # geometric mean
+            logits = np.stack(
+                [log_pj, log_d + log_nu, log_pi], axis=1,
+            )                                # (S, 3)
+            probs = softmax(logits, axis=1)  # (S, 3)
+            p_left = float(probs[:, 0].mean())
+            p_tie = float(probs[:, 1].mean())
+            p_right = float(probs[:, 2].mean())
             key = (i, j) if i < j else (j, i)
             entry = pairwise_lh.setdefault(key, {
                 "sum_left": 0.0, "sum_tie": 0.0, "sum_right": 0.0, "n": 0,
@@ -538,7 +551,7 @@ def predict_btd(
         if position_neutral
         else result.beta_right_draws
     )
-    nu = result.nu_draws
+    log_nu = np.log(result.nu_draws)
 
     out: list[dict] = []
     for o in observations:
@@ -554,25 +567,24 @@ def predict_btd(
             continue
         i = item_to_idx[o.left]
         j = item_to_idx[o.right]
+        # Same three logits as the fit. Categorical normalization
+        # is owned by ``scipy.special.softmax``; no custom log-
+        # softmax or max-shift trick is implemented here.
         log_pi = theta[:, j] + beta_draws   # right slot
         log_pj = theta[:, i]                # left slot
-        log_d = 0.5 * (log_pi + log_pj)
-        a = log_pj
-        b = log_d + np.log(nu)
-        c = log_pi
-        m = np.maximum(np.maximum(a, b), c)
-        ea = np.exp(a - m)
-        eb = np.exp(b - m)
-        ec = np.exp(c - m)
-        Z = ea + eb + ec
+        log_d = 0.5 * (log_pi + log_pj)     # geometric mean
+        logits = np.stack(
+            [log_pj, log_d + log_nu, log_pi], axis=1,
+        )                                   # (S, 3)
+        probs = softmax(logits, axis=1)     # (S, 3)
         out.append({
             "left": o.left,
             "right": o.right,
             "repeat": o.repeat,
             "verdict": o.verdict,
-            "p_left_wins": float((ea / Z).mean()),
-            "p_tie": float((eb / Z).mean()),
-            "p_right_wins": float((ec / Z).mean()),
+            "p_left_wins": float(probs[:, 0].mean()),
+            "p_tie": float(probs[:, 1].mean()),
+            "p_right_wins": float(probs[:, 2].mean()),
         })
     return out
 
