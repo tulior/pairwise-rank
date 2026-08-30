@@ -1,250 +1,453 @@
 # AGENTS.md
 
-Instructions for any agent (Mavis, Mavis, or otherwise) working in this
-repository. These rules are derived from concrete failures and are
-non-negotiable. Read the whole file before doing anything.
+Operational guide for any coding agent (Mavis, Mavis, or otherwise)
+working in this repository. Read this file first.
+
+The companion document `EXPERIMENT_DESIGN.md` holds the design
+methodology (constructs, prompt design, campaign shape, scaling
+boundary). `AGENTS.md` holds the operating rules for code
+maintenance and the statistical/probabilistic contract this
+library implements. Both must be respected.
 
 ---
 
-## 1. What this repo is
+## 1. Project purpose
 
-`pairwise-rank` is a **model + protocol library** for Bayesian
-ordinal paired-comparison ranking. It exports:
+`pairwise-rank` is a small reusable library for reproducible
+pairwise ranking under the LEFT / TIE / RIGHT protocol.
 
-- A Davidson (BTD) model fit (`fit_btd`) and ordered-logit fit (`fit_ordinal`)
-- A 3-level protocol loader (`load_observations_jsonl`, `load_observations`)
-- Summary functions (`direct_summary`, `summarize_btd`, `predict_btd`)
-- Type definitions (`BTDFitResult`, `Verdict`, etc.)
-- A test suite
+The currently supported statistical stack is:
 
-That is the entire public surface. It is **not** a framework, a CLI,
-a provider registry, a dashboard, an LLM caller, or a runner.
-
----
-
-## 2. What this repo is NOT
-
-Do not add, ever, under any pretext:
-
-- API clients (no `openai`, no `requests`, no `httpx` for the public API)
-- LLM runners or experiment drivers
-- Prompts of any kind
-- Reasoning traces or audit outputs
-- API credentials, tokens, or environment variable reads
-- Test fixtures that contain real LLM responses
-- ZIP archives of "experiment runs"
-- Markdown reports of experiment results
-- Candidate sets, vote tallies, or per-cell observation data
-- Profile photos, PFPs, bios, usernames, or any personal-profile
-  content
-- Polarity classifiers, audit schemas, or "second-judge" calls
-
-These belong in `/workspace/` (or the user's private experiment
-directory). They are not part of the library.
-
----
-
-## 3. The user's LLM design (M3 / `/v1/responses`)
-
-The user judges pairwise comparisons with a single LLM call per
-pair. The body is **exactly six top-level fields**:
-
-```jsonc
-{
-  "model":         "MiniMax-M3",
-  "instructions":  "<user-provided instruction, character-for-character>",
-  "input":         [{ "role": "user", "content": [...] }],
-  "tools":         [<one tool, see below>],
-  "tool_choice":   "auto",
-  "reasoning":     { "effort": "high" }
-}
+```
+LEFT / TIE / RIGHT judgments
+-> direct counterbalanced summaries
+-> Bayesian Davidson / Bradley-Terry-Davidson
+-> optional right-position effect
 ```
 
-Hard rules:
+Legacy compatibility is **ingest-only** for the 5-level scale:
 
-1. **Exactly one tool. The decision variable only.** The function
-   is `record_posterior_comparison` (or analog). It accepts one
-   parameter (`verdict`) with an enum of three values: `LEFT`,
-   `TIE`, `RIGHT`. Nothing else. No audit schema, no
-   multi-property classification, no "reasoning trace" tool,
-   no "extract mechanism" tool.
+```
+LEFT_STRONG  -> LEFT
+RIGHT_STRONG -> RIGHT
+```
 
-2. **The tool's name and description are part of the rubric.**
-   See `EXPERIMENT_DESIGN.md` §16. The model reads the function
-   name, description, parameter name, parameter description,
-   and enum when committing its answer. Use passive recording
-   verbs (`record_posterior_comparison`), not active choice
-   verbs (`choose_better_bio`, `select_best_profile`,
-   `rank_bios`). State the estimand in the description, not
-   the storage form. Make `TIE` a first-class option.
+This collapse is performed by the protocol layer when loading
+observations and by `fit_btd` / `direct_summary` when ingesting
+verdicts. The 3-level scale carries all the model structure. No
+5-level inference is performed.
 
-3. **`tool_choice` is `"auto"`** for the Responses API. The
-   documented values are `"none"` and `"auto"`. The
-   named-function-forcing object (`{"type": "function",
-   "name": "..."}`) is not in the documented schema. Do not
-   invent API features that do not exist.
-
-4. **`reasoning: {"effort": "high"}`** is the appropriate value
-   for the judge. M3 treats `high` / `medium` / `low` /
-   `minimal` as compatibility values that all enable M3's
-   Adaptive Thinking. They do not select different reasoning
-   depths. The only way to disable reasoning is to omit the
-   field or use `"none"`. Use the value the user specified;
-   do not silently substitute.
-
-5. **Image parts use `input_image` with an object-valued
-   `image_url`:** `{"type": "input_image", "image_url": {"url":
-   "data:image/png;base64,...", "detail": "high"}}`. PNG,
-   1024px lossless, base64 inlined. The `detail: "high"`
-   field is required for fine-grained profile elements.
-
-6. **Each call has a fresh independent context.** The user
-   does not want session memory bleeding across pairs. The
-   runner constructs the body from scratch per call.
-
-7. **The runner is the protocol enforcer, not the API.** With
-   `tool_choice: "auto"` and one tool defined, the model will
-   usually emit the call — but it is not an API-level
-   guarantee. A completed response without exactly one valid
-   `function_call` is a malformed judgment. **Retry it under
-   the existing retry policy. Do not convert free text into a
-   verdict.** Do not invent a verdict from reasoning content.
-   Do not fall back to "JSON in message body." Use the
-   function call or retry.
+M0 (ordered-logistic / 5-level) inference is **removed**. Do
+not resurrect it. There is no `fit_ordinal`. There is no
+`FitResult`. The methods in the public API are `fit_btd`,
+`summarize_btd`, `predict_btd`, `direct_summary`, plus the
+protocol helpers.
 
 ---
 
-## 4. Never silently edit user-provided values
+## 2. Design philosophy
 
-This is the failure mode that produced the need for this file.
-The user gives an instruction. The agent edits it before
-sending. The user finds out. The agent looks like an idiot.
+The single most important rule in this project:
+
+```
+Do not increase model complexity to solve an experimental-design problem.
+```
+
+A scaling problem in the design layer (the candidate set is too
+large, the comparison budget is bounded, the decision is only
+over the top-k) is addressed by changing the design. It is not
+addressed by replacing the ranking likelihood with a more
+expressive model. A misspecification problem in the model layer
+is addressed by changing the model, not by adding richer
+machinery to absorb design choices.
+
+The two layers have different jobs:
+
+```
+likelihood pools evidence
+design buys evidence
+```
+
+For the current small-N use case, complete counterbalanced
+round robin is the default design. Adaptive pair selection is a
+separate future design concern, **not** part of `fit_btd`. See
+`EXPERIMENT_DESIGN.md` §20 for the scaling boundary and the
+frozen modeling layer for the current use case.
+
+---
+
+## 3. Statistical ownership
+
+This library is intentionally small. It does not reimplement
+operations a maintained library already owns.
+
+| library       | owns                                                |
+|---------------|-----------------------------------------------------|
+| PyMC          | model construction and NUTS sampling                |
+| ArviZ         | R-hat, ESS, HDI, MCMC diagnostics, summaries        |
+| SciPy         | numerical softmax (used outside PyMC)               |
+| `pairwise-rank` | Davidson model equation, direct W/L/T summaries, posterior rank reductions, position-neutral pair predictions, protocol/provider glue |
+
+`pairwise-rank` does **not** own:
+
+- a custom sampler, HMC, or NUTS implementation
+- a custom R-hat, ESS, or HDI implementation
+- a custom generic softmax outside PyMC
+- a custom generic categorical likelihood
+- a custom divergence detector
+- a custom adaptation scheme
+
+If a question can be answered by a maintained library, use the
+maintained library. Before adding machinery, ask:
+
+```
+can a maintained library already do this?
+```
+
+Prefer deletion over abstraction.
+
+---
+
+## 4. Davidson parameterization (exact)
+
+This is the parameterization `fit_btd` implements. It is
+documented here so a future agent does not accidentally drift.
+
+```
+sigma_theta ~ HalfNormal(1.0)
+theta       ~ ZeroSumNormal(sigma=sigma_theta, shape=n)   # sum-to-zero
+beta_right  ~ Normal(0.0, 0.5)
+eta_tie     ~ Normal(0.0, 1.0)
+nu          = exp(eta_tie)                               # > 0
+
+a_left  = theta[left]
+a_right = theta[right] + beta_right
+
+logit P(LEFT)  = a_left
+logit P(TIE)   = eta_tie + 0.5 * (a_left + a_right)
+logit P(RIGHT) = a_right
+```
+
+Sign conventions:
+
+- Larger `theta` means stronger in general.
+- `beta_right > 0` means the right slot is advantaged.
+- `nu = 1` is the symmetric tie prior; `nu > 1` favors ties;
+  `nu < 1` penalizes them.
+- The likelihood is symmetric in `(i, j)` and reduces to
+  Bradley-Terry as `nu -> 0`.
+- This is **Davidson**, not Rao-Kupper. The tie term uses the
+  geometric mean `nu * sqrt(lambda_i * lambda_j)`, not
+  `nu * (lambda_i + lambda_j) / 2`. The two are statistically
+  distinguishable on real data; do not substitute one for the
+  other.
+
+Position-neutral prediction (used by `predict_btd(...
+position_neutral=True)` and the per-pair probabilities in
+`summarize_btd`) **forces `beta_right = 0`** in the prediction
+step. The fitted posterior is unchanged; only the prediction
+uses the position-neutral edge advantage.
+
+`theta` is **relative to the current candidate field**, not
+against any external reference. Sum-to-zero is enforced within
+the items being fit. Do not compare `theta` magnitudes across
+separately fitted fields.
+
+---
+
+## 5. Evidence interpretation
+
+Direct W/L/T remains the primary raw evidence.
+
+For small matched A/B experiments, prefer direct counterbalanced
+tallies. The BTD posterior is barely identifiable with two
+items and small K.
+
+Direct tournament score (per item):
+
+```
+S_i = (W_i + 0.5 * T_i) / (W_i + L_i + T_i)
+```
+
+Range `[0, 1]`, position-neutral, well-defined on incomplete
+data:
+
+- all wins   -> 1.0
+- all losses -> 0.0
+- all ties   -> 0.5
+- mixed      -> strictly between 0 and 1
+
+BTD is the global transitive approximation. It pools evidence
+across all pairs of items.
+
+Direct-vs-global disagreement is called:
+
+```
+direct-vs-global strain
+```
+
+Do **not** label every strain a cycle. A cycle requires
+demonstrated cyclic structure across at least three candidates.
+The model falsification audit at
+`experiments/model_falsification/MODEL_FALSIFICATION.md`
+documents the empirical evidence that an identified cycle
+augmentation does not earn its complexity at the project scale
+and that strain-like residuals are typically tie-model
+misspecification, not non-transitivity.
+
+---
+
+## 6. Diagnostics
+
+- **Divergences** are model-geometry warnings. A `None`
+  divergence count is also a warning, not a pass — it means
+  the sampler backend did not report a divergences field and
+  the fit should be treated as unverified for geometry.
+  Increasing K or `target_accept` does not repair bad posterior
+  geometry; it papers over it. If the geometry is broken, the
+  fix is in the model or the data, not in sampler settings.
+- **R-hat near 1** is necessary, not sufficient. Four chains
+  agreeing at R-hat = 1.0 says the chains mixed to the same
+  distribution. It does not say that distribution is the right
+  one for the data. Inspect per-parameter posteriors.
+- **ESS bulk and ESS tail** measure effective Monte Carlo
+  information, not statistical coverage. Bulk ESS for central
+  summaries, tail ESS for quantiles / HDI endpoints. A chain
+  with R-hat = 1.0 and ESS = 50 has not explored enough.
+- **One PPC statistic does not prove calibration.** A model can
+  match a single chosen summary while being wrong elsewhere.
+- **TIE rate is a diagnostic, not a quality score.** A high
+  TIE rate may mean the construct does not discriminate, or
+  that candidates are genuinely equivalent. A 0% TIE rate
+  means the judge differentiated the presented alternatives; it
+  does not mean the experiment was intrinsically good.
+
+---
+
+## 7. Testing
+
+The full test suite is 85 tests across four files:
+
+```
+tests/test_btd.py
+tests/test_btd_predict.py
+tests/test_protocol.py
+tests/test_v04.py
+```
+
+In execution-time-constrained environments, run them in 4
+sequential batches of approximately 2 minutes each. The
+expected outcome is 85 / 85 passing.
+
+```
+PYTHONPATH=src pytest tests/test_btd.py
+PYTHONPATH=src pytest tests/test_btd_predict.py
+PYTHONPATH=src pytest tests/test_protocol.py
+PYTHONPATH=src pytest tests/test_v04.py
+```
+
+PyMC sampling dominates wall time. Do not parallelize across
+files; PyMC already parallelizes chains internally.
+
+Provider tests (`tests/test_providers/`) mock the HTTP layer
+and do not require network access. Live provider integration
+tests are opt-in and **not** part of the default suite.
+
+---
+
+## 8. Repository editing rules
+
+Keep this project small.
+
+Before adding machinery ask:
+
+```
+can a maintained library already do this?
+```
+
+Prefer deletion over abstraction. Do not add:
+
+- registries
+- factories
+- base-class hierarchies
+- plugin frameworks
+- sampler wrappers
+- capability negotiation
+- dependency injection containers
+- generic HTTP SDKs
+- provider framework code larger than the problem requires
+
+unless multiple real implementations force them. Right now,
+there is exactly one provider (MiniMax). A single module is
+enough.
+
+Do not add code, examples, or artifacts that belong in
+`/workspace/` (the user's private experiment directory):
+
+- LLM runners, experiment drivers, prompts
+- API credentials, tokens, or environment-variable reads (the
+  one exception is the MiniMax connector, which reads
+  `MINIMAX_API_KEY` from the environment)
+- Test fixtures containing real LLM responses
+- ZIP archives of "experiment runs"
+- Markdown reports of experiment results
+- Candidate sets, vote tallies, per-cell observation data
+- Reasoning traces as statistical input
+
+If a user requests something in the above list, it goes in
+`/workspace/`, not in the library.
+
+---
+
+## 9. Provider philosophy
+
+The library ships a **thin MiniMax connector** as a
+convenience. It is not a provider framework. There is one
+connector module; the abstraction is one Protocol.
+
+The policy for any provider:
+
+1. **Use the provider's default/recommended sampling
+   behavior.** Do not hand-tune temperature, top_p, max_p,
+   penalties, seed, beam/search controls. The library never
+   sends these unless the provider API requires one of them.
+2. **Request the maximum supported reasoning explicitly,
+   where the API exposes one.** For MiniMax M3, this is
+   `reasoning: {"effort": "high"}`. The compatibility values
+   `high / medium / low / minimal` enable Adaptive Thinking
+   but do not tune its depth. Use the maximum to enable
+   reasoning; do not interpret the value as a depth knob.
+3. **Centralize the model identifier in the connector.**
+   Update it in one place when the model changes.
+4. **Authentication from environment, never hard-coded.**
+   Document the env var name in the connector docstring.
+5. **Preserve enough provider/model metadata for experiment
+   reproducibility.** The judgment object should record the
+   provider, model, and reasoning effort used.
+
+If temperature / top_p are not sent, record them conceptually
+as "provider default / not overridden", not as guessed numeric
+values. The connector does not pretend to know the provider's
+internal defaults.
+
+---
+
+## 10. Adding a provider
+
+To add a new provider, an agent should:
+
+1. Read the provider's **current official API documentation**.
+   The model identifier, request field names, and reasoning
+   controls change. Do not rely on memory or older issues.
+2. Implement the existing connector interface:
+   `judge(JudgmentRequest) -> Judgment`. Do not invent a
+   parallel protocol.
+3. Keep provider code in its own module under
+   `src/pairwise_rank/providers/`. One file per provider.
+4. Use the provider's default sampling behavior. Do not send
+   temperature / top_p / penalties / seed / beam unless the
+   provider API requires one of them.
+5. Request the maximum supported reasoning explicitly, if the
+   API exposes one. Document the field name and value in the
+   connector's module docstring.
+6. Map the provider response into the library's canonical
+   `Judgment` type: `(verdict, reasoning, provider, model,
+   reasoning_effort)`. If the provider's structured-output
+   schema differs from the canonical schema, adapt inside the
+   connector. Do not weaken the canonical internal contract to
+   mirror a provider API.
+7. Preserve raw provider metadata in the `Judgment.raw` field
+   for debugging and audit. Do not log the raw response to
+   stdout by default.
+8. Read authentication from the environment. Document the env
+   var name in the connector docstring. Never hard-code
+   credentials. Never commit secrets.
+9. Add contract tests under `tests/test_providers/`. Mock the
+   HTTP layer. Test at least: LEFT/TIE/RIGHT mapping, malformed
+   response fails loudly, no temperature / no top_p, reasoning
+   setting is present, auth header is sent.
+10. Do not modify statistical code. Adding a new provider
+    should not require editing `btd.py` or `protocol.py`.
+
+If structured output / tool-use support differs between
+providers, the adapter lives inside the connector. The
+canonical internal judgment contract stays fixed.
+
+---
+
+## 11. Operational rules (preserved)
+
+These rules were derived from concrete failures. They are
+non-negotiable. They are project-specific conventions that
+agents have been observed to violate.
+
+### Never silently edit user-provided values
 
 Specific banned edits:
 
-- Changing `reasoning.effort` from the value the user specified
-  (e.g. `high` → `low`) to save tokens.
-- Switching `tool_choice` from one mode to another because
-  one mode is "flakier" than another.
-- Modifying the function name from what the user said (e.g.
-  `record_preference` → `record_posterior_comparison`).
-- Truncating or paraphrasing the `instructions` field.
-- Removing tools, parameters, or descriptions to "simplify."
-- Adding tools, parameters, or descriptions to "improve."
-- Switching image `detail` from `high` to `low`/`auto`.
+- Changing a user-specified reasoning value to "save tokens"
+- Switching tool choice from one mode to another because one is
+  "flakier"
+- Modifying function names from what the user said
+- Truncating or paraphrasing user-provided instructions
+- Removing tools / parameters / descriptions to "simplify"
+- Adding tools / parameters / descriptions to "improve"
+- Switching image detail from "high" to "low"/"auto"
 
-If the user-provided values are wrong, ask. If they are
-right, use them verbatim.
+If the user-provided values are wrong, ask. If they are right,
+use them verbatim.
 
----
-
-## 5. Show the body before running
+### Show the body before running
 
 For any new experiment or any change to the design, **show
-the user the full JSON body before sending it to the API.**
-This is not optional. Even if the body is "obviously the
-same as last time." The user will tell you to go.
+the user the full request body before sending it to the API.**
+This is not optional. Even if the body is "obviously the same
+as last time."
 
-If a previous experiment's runner is being reused with
-modifications, show the diff in the body before running.
-
----
-
-## 6. The user cares about ranking and probability values
-
-The primary deliverable of any tournament is:
-
-- The pairwise W-L-T counts per item.
-- The BTD posterior: `θ` mean + HDI, `P(best)`, `P(top2)`,
-  expected rank, `β_right`, `ν`, divergences, `R̂`, ESS.
-- The direct-vs-BTD reconciliation, if any.
-- A clear final ranking with the top-1 named.
-
-The user does **not** want:
-
-- A 12-property polarity audit by a second LLM.
-- A "construct focus" classification of the reasoning.
-- A per-cell mechanism breakdown.
-- An audit log of every cell with mechanism × polarity counts.
-
-If the user asks for an audit, do it. If the user does not,
-do not invent one. The reasoning is captured as audit
-metadata (per-observation `reasoning` text stored alongside
-the verdict) and is **not statistical input** to the model.
-
----
-
-## 7. When the user gives a binary choice, do not ask which one
-
-If the user has stated the answer, or the answer is obvious,
-just do it. The user does not want to be polled.
-
-The 2026-08-29 failure: I asked "do you want me to (a)
-replace the old audit script with the new one or (b) keep
-both" when the answer was obviously (a) — the user had
-already said the new one was the canonical version.
-
-The fix: do not offer false choices. Either do the right
-thing or describe what you're about to do and do it. If
-something is genuinely ambiguous, ask once, briefly.
-
----
-
-## 8. Repository hygiene before any commit
+### Repository hygiene before any commit
 
 Before `git commit`:
 
-1. Run `git status --short` and `git diff --stat` to see
-   what is staged. If anything under `tests/`, `src/`, or
-   the repo root is a personal-experiment artifact, unstage
-   it.
+1. Run `git status --short` and `git diff --stat` to see what
+   is staged. Unstage personal-experiment artifacts.
 2. Verify the version in `pyproject.toml` and
-   `src/pairwise_rank/__init__.py` is bumped.
+   `src/pairwise_rank/__init__.py` is consistent if the change
+   is user-facing.
 3. Verify the test suite passes.
 4. Verify `git log -1` shows the expected commit message.
 
-The user will check. Be honest in the commit message.
+### Push protocol
 
----
+In some sandbox environments, GitHub's SSL certificate
+verification fails. Use:
 
-## 9. Push protocol
-
-GitHub's SSL certificate verification occasionally fails in
-this sandbox. Use:
-
-```bash
+```
 git -c http.sslVerify=false push
 ```
 
-The user has accepted this workaround. Do not pretend the
-underlying issue is solved.
+This workaround is accepted. Do not pretend the underlying
+issue is solved.
 
----
+### PyPI protocol
 
-## 10. PyPI protocol
-
-This package is published to the canonical PyPI. The Aliyun
-mirror is blocked. Use:
+This package is published to the canonical PyPI. Use:
 
 ```
 --index-url https://pypi.org/simple/ --break-system-packages
 ```
 
-Do not waste time fighting the Aliyun mirror.
+Do not waste time fighting any mirror.
+
+### When in doubt, ask once, briefly
+
+Silent changes are worse than brief questions. If a value is
+ambiguous, ask. If the answer is obvious, do it.
+
+The test: would the user be surprised by what I'm about to
+do? If yes, ask. If no, do it.
 
 ---
 
-## 11. When in doubt, ask once, briefly
-
-The user values judgment. But silent changes are worse than
-brief questions. If a value is ambiguous or a tradeoff is
-non-obvious, ask. If the answer is obvious, do it.
-
-The test is: would the user be surprised by what I'm about
-to do? If yes, ask. If no, do it.
-
----
-
-This file is the source of truth. `EXPERIMENT_DESIGN.md`
-holds the design principles; `AGENTS.md` holds the operating
-rules. Both must be respected.
+This file is the source of truth for repository policy.
+`EXPERIMENT_DESIGN.md` holds the design methodology. Both
+must be respected.
