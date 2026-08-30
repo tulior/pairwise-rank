@@ -338,7 +338,6 @@ def fit_btd(
     with model:
         idata = pm.sample(
             draws=draws, tune=tune, chains=chains,
-            nuts_sampler="numpyro",
             target_accept=target_accept,
             random_seed=seed,
             progressbar=False,
