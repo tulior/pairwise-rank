@@ -394,21 +394,41 @@ be right.
 For multi-candidate tournaments, report both:
 
 - **Direct counterbalanced evidence.** Wins, losses, ties, and a
-  tie-adjusted tournament score per item. For a complete balanced
-  tournament with both orientations and K repeats, the per-item
-  probability-like score is
+  tie-adjusted tournament score per item. The per-item
+  probability-like score is computed from the *observed* tallies
+  (W = wins, L = losses, T = ties across every orientation and
+  every repeat that was actually observed for the item):
+
+  ```
+  S_i^direct = (W_i + 0.5 * T_i) / (W_i + L_i + T_i)
+  ```
+
+  Range [0, 1], position-neutral (does not depend on which slot
+  the item appeared in):
+
+  - all wins    -> 1.0
+  - all losses  -> 0.0
+  - all ties    -> 0.5
+  - mixed       -> strictly between 0 and 1
+
+  For a complete balanced tournament with both orientations and K
+  repeats per orientation, the observed denominator equals
+  `2 * K * (N - 1)` and this is exactly equivalent to
 
   ```
   S_i^direct = (W_i + 0.5 * T_i) / (2 * K * (N - 1))
   ```
 
-  range [0, 1], position-neutral (does not depend on which slot
-  the item appeared in). The denominator is `2 * K * (N - 1)`
-  because each item faces the other `N - 1` items in `K` repeats
-  on each side, and the maximum possible `(W + 0.5 * T)` is
-  `2 * K * (N - 1)`. Divide by `K * (N - 1)` instead and the
-  statistic lives on [0, 2] and is a different quantity. Watch
-  the denominator.
+  but the observed-count form is preferred because it is
+  well-defined on incomplete, resumed, or filtered data sets
+  where some orientations or repeats are missing. The previous
+  `direct_summary` implementation divided by `N - 1` only,
+  which produced a [0, K] statistic for K repeats per pair; the
+  observed-count form is the corrected contract.
+
+  Items with no observations at all are reported with a score of
+  `None` (the package convention for an unavailable per-item
+  summary; cf. `summarize_btd`'s `max_rhat=None` fallback).
 - **A global latent-strength model** (typically BTD — see §9).
 
 Disagreement between direct and global is strain, not automatically

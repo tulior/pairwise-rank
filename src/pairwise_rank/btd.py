@@ -585,18 +585,43 @@ def direct_summary(observations) -> dict:
         {
           "per_item": {"wins": {...}, "losses": {...}, "ties": {...}},
           "pairwise": {"<a>,<b>": {"wins_first": int, "wins_second": int, "ties": int}},
-          "tournament_score": {"<id>": float, ...},  # tie-adjusted, position-neutral
+          "tournament_score": {"<id>": float | None, ...},  # tie-adjusted, position-neutral, in [0, 1]
           "n_observations": int,
           "n_left_strong": int,    # how many LEFT_STRONG were collapsed
           "n_right_strong": int,
         }
 
     tournament_score is a per-item score that gives half credit for
-    ties and full credit for wins, normalized by the number of
-    other items (N-1). A score of 1.0 means the item won against
-    every other item; 0.0 means it lost to every other item. The
-    score is position-neutral (it does not depend on which slot the
-    item appeared in).
+    ties and full credit for wins, normalized by the *observed*
+    total number of judgments for that item:
+
+        score_i = (W_i + 0.5 * T_i) / (W_i + L_i + T_i)
+
+    where W_i, L_i, T_i are the item's win / loss / tie counts
+    across the full observation set (every orientation and every
+    repeat is counted). Range is [0, 1]:
+
+        all wins    -> 1.0
+        all losses  -> 0.0
+        all ties    -> 0.5
+        mixed       -> strictly between 0 and 1
+
+    The score is position-neutral: it does not depend on which slot
+    the item appeared in, only on the verdicts. For a complete
+    balanced tournament with both orientations and K repeats per
+    orientation, the observed denominator equals 2*K*(N-1) and the
+    score is equivalent to (W + 0.5*T) / (2*K*(N-1)). The observed
+    form is preferred because it is well-defined on incomplete,
+    resumed, or filtered data sets where some orientations or
+    repeats are missing.
+
+    Items with no observations (defensive: cannot happen under the
+    current invariants, since seen_items is built only from
+    observations with verdicts) are reported with a score of
+    None -- the package convention for an unavailable per-item
+    summary, matching ``out["max_rhat"] = None`` in
+    :func:`summarize_btd` when ArviZ diagnostics cannot be
+    computed.
     """
     from collections import defaultdict
 
@@ -636,16 +661,20 @@ def direct_summary(observations) -> dict:
             else:
                 pairs[p]["wins_second"] += 1
 
-    # Tie-adjusted tournament score: wins + 0.5 ties, normalized by
-    # the number of other items. This is a position-neutral score.
-    n = len(seen_items)
-    tournament_score: dict[str, float] = {}
-    if n > 1:
-        denom = n - 1
-        for item in seen_items:
-            w = item_wins.get(item, 0)
-            t = item_ties.get(item, 0)
-            tournament_score[item] = (w + 0.5 * t) / denom
+    # Tie-adjusted tournament score: half credit for ties, full
+    # credit for wins, normalized by the *observed* total
+    # judgments for the item (W + L + T). This gives a
+    # probability-like score in [0, 1] and is robust to
+    # incomplete / resumed / filtered data sets. The position-
+    # neutrality of the verdict counts is preserved here, so the
+    # score is position-neutral by construction.
+    tournament_score: dict[str, float | None] = {}
+    for item in seen_items:
+        w = item_wins.get(item, 0)
+        l = item_losses.get(item, 0)
+        t = item_ties.get(item, 0)
+        denom = w + l + t
+        tournament_score[item] = (w + 0.5 * t) / denom if denom > 0 else None
 
     return {
         "per_item": {
