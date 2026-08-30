@@ -331,6 +331,30 @@ def summarize(
 # Posterior predictive check
 # ----------------------------------------------------------------------------
 
+def _cell_agreement(ys: np.ndarray, cells: list[list[int]], n_cells: int) -> float:
+    """Fraction of repeated-observation cells in which all repeats
+    agree on the same verdict code.
+
+    A cell is a group of observation indices that share the same
+    (a, b, left, right) -- the per-(pair, orientation) repeated
+    judgment set. ``ys[k]`` is the verdict code for observation k.
+    The function returns the fraction of cells whose repeats are
+    unanimous, including single-observation cells (which are
+    trivially unanimous and are counted toward the numerator).
+    This matches the original PPC contract exactly: a cell
+    contributes to the numerator iff the set of verdict codes in
+    the cell has size 1, including the empty cell. The
+    denominator is the total number of cells.
+    """
+    if n_cells <= 0:
+        return 0.0
+    n_agree = sum(
+        1 for cell_idx in cells
+        if len(set(int(ys[k]) for k in cell_idx)) == 1
+    )
+    return n_agree / max(1, n_cells)
+
+
 def posterior_predictive_check(
     result: FitResult,
     observations: list[Observation],
@@ -346,53 +370,87 @@ def posterior_predictive_check(
     on the verdict. Returns observed value, PPC distribution, and tail
     probability.
 
+    Implementation: the replicated verdicts are drawn from the actual
+    ``OrderedLogistic`` likelihood via :func:`pymc.sample_posterior_predictive`,
+    so the package no longer hand-rolls the 5-category probability math.
+    Domain-specific grouping and the per-replicated-dataset agreement
+    reduction remain in this module (they are not generic PyMC
+    machinery).
+
     A single PPC statistic does not establish full calibration. Use as
     one diagnostic, not a certification.
     """
     from collections import defaultdict
-    from scipy.special import expit
 
-    rng = np.random.default_rng(seed)
-    theta = result.theta_draws
-    beta = result.beta_right_draws
-    cutpoints = result.cutpoint_draws
-    S = theta.shape[0]
-
-    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
-    rights = np.array([item_to_idx[o.right] for o in observations], dtype=int)
-    lefts = np.array([item_to_idx[o.left] for o in observations], dtype=int)
-    ys = np.array([verdict_to_code(o.verdict) for o in observations], dtype=int)
-
+    # Group observed rows into repeated cells. Same grouping as the
+    # original implementation.
     by_cell = defaultdict(list)
     for k, o in enumerate(observations):
         by_cell[(o.a, o.b, o.left, o.right)].append(k)
     cells = list(by_cell.values())
     n_cells = len(cells)
+    ys = np.array([verdict_to_code(o.verdict) for o in observations], dtype=int)
 
-    ppc_stat = np.zeros(n_ppc)
-    for ps in range(n_ppc):
-        s = int(rng.integers(0, S))
-        n_agree = 0
-        for cell_idx in cells:
-            if len(cell_idx) < 2:
-                continue
-            eta = theta[s, rights[cell_idx[0]]] - theta[s, lefts[cell_idx[0]]] + beta[s]
-            cp = cutpoints[s]
-            p0 = expit(cp[0] - eta)
-            p1 = expit(cp[1] - eta) - p0
-            p2 = expit(cp[2] - eta) - expit(cp[1] - eta)
-            p3 = expit(cp[3] - eta) - expit(cp[2] - eta)
-            p4 = 1.0 - expit(cp[3] - eta)
-            probs = np.clip(np.array([p0, p1, p2, p3, p4]), 1e-10, 1.0)
-            probs = probs / probs.sum()
-            votes = rng.choice(5, size=len(cell_idx), p=probs)
-            if (votes == votes[0]).all():
-                n_agree += 1
-        ppc_stat[ps] = n_agree / max(1, n_cells)
+    # Observed agreement (no model involved).
+    obs_stat = _cell_agreement(ys, cells, n_cells)
 
-    n_agree_obs = sum(1 for cell_idx in cells
-                      if len(set(ys[k] for k in cell_idx)) == 1)
-    obs_stat = n_agree_obs / max(1, n_cells)
+    # Reproducibly select exactly n_ppc posterior draws to drive
+    # n_ppc replicated datasets. The original implementation
+    # sampled n_ppc flat (chain*draw) indices with replacement;
+    # we sample without replacement when n_ppc <= S_total for
+    # cleaner bookkeeping, and with replacement when n_ppc >
+    # S_total. The contract -- "n_ppc replicated datasets" --
+    # is preserved either way.
+    idata = result.idata
+    n_chains = int(idata.posterior.sizes["chain"])
+    n_draws = int(idata.posterior.sizes["draw"])
+    S_total = n_chains * n_draws
+    rng = np.random.default_rng(seed)
+    if n_ppc <= S_total:
+        flat = rng.choice(S_total, size=n_ppc, replace=False)
+    else:
+        flat = rng.integers(0, S_total, size=n_ppc)
+    chain_idx = flat // n_draws
+    draw_idx = flat % n_draws
+
+    # Build a fresh (1, n_ppc) InferenceData by advanced indexing
+    # on (chain, draw). The original xarray ``isel(chain=...,
+    # draw=...)`` would take the cartesian product of the two
+    # index arrays, so we go through numpy and reconstruct.
+    import arviz as az
+    import xarray as xr
+    posterior_vars = {}
+    for v in idata.posterior.data_vars:
+        arr = np.asarray(idata.posterior[v].values)        # (chain, draw, ...)
+        subset = arr[chain_idx, draw_idx]                   # (n_ppc, ...)
+        dims = ("chain", "draw") + tuple(idata.posterior[v].dims[2:])
+        posterior_vars[v] = (dims, subset[np.newaxis, ...])
+    sub_idata = az.InferenceData(posterior=xr.Dataset(posterior_vars))
+
+    # Rebuild the model from the observations so that
+    # sample_posterior_predictive can re-evaluate the
+    # OrderedLogistic likelihood on each posterior draw.
+    item_to_idx = {i: k for k, i in enumerate(result.item_ids)}
+    n_items = len(result.item_ids)
+    model = _build_model(observations, item_to_idx, n_items)
+
+    with model:
+        ppc = pm.sample_posterior_predictive(
+            sub_idata,
+            var_names=["y_obs"],
+            random_seed=seed,
+            progressbar=False,
+        )
+
+    # Predictive verdicts have shape (chain_subset, draw_subset, n_obs).
+    replicated = np.asarray(
+        ppc.posterior_predictive["y_obs"]
+    ).reshape(-1, len(observations))
+
+    # Compute the agreement statistic for each replicated dataset.
+    ppc_stat = np.array(
+        [_cell_agreement(replicated[i], cells, n_cells) for i in range(replicated.shape[0])]
+    )
 
     hdi = az.hdi(ppc_stat, hdi_prob=0.9)
     p_tail = float((ppc_stat >= obs_stat).mean())
@@ -403,5 +461,5 @@ def posterior_predictive_check(
         "ppc_mean": float(ppc_stat.mean()),
         "ppc_hdi_90": [float(hdi[0]), float(hdi[1])],
         "p_ppc_ge_observed": p_tail,
-        "n_ppc_draws": n_ppc,
+        "n_ppc_draws": int(ppc_stat.shape[0]),
     }
