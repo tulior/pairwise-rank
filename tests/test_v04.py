@@ -546,13 +546,16 @@ def test_tournament_score_complete_balanced_agrees_with_2K_N_minus_1():
         assert abs(s_observed - s_design) < 1e-12
 
 
-# ---- sanity: existing 5-level workflow still works -------------------------
+# ---- sanity: legacy 5-level data still flows through BTD --------------------
 
-def test_existing_5level_workflow_unchanged():
-    """A user who calls fit_ordinal on 5-level data still gets the
-    ordered logit, and the model name in the docstring is correct.
+def test_legacy_5level_data_fits_via_btd():
+    """Legacy 5-level verdicts (LEFT_STRONG, RIGHT_STRONG) are
+    accepted by fit_btd, collapsed to 3-level, and produce a normal
+    BTD posterior. The M0 ordered-logistic model and its 5-level
+    inference path were removed in v0.5; legacy data must work
+    through the supported path.
     """
-    from pairwise_rank import fit_ordinal, summarize
+    from pairwise_rank import fit_btd, summarize_btd
     obs = [
         _obs("a", "b", "a", "b", "LEFT_STRONG", 1),
         _obs("a", "b", "a", "b", "LEFT", 2),
@@ -560,10 +563,33 @@ def test_existing_5level_workflow_unchanged():
         _obs("a", "b", "a", "b", "RIGHT", 1),
         _obs("a", "b", "a", "b", "RIGHT_STRONG", 2),
     ]
-    res = fit_ordinal(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
-    s = summarize(res)
+    res = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    s = summarize_btd(res, observations=obs)
     # Both items have theta and P(best)
     assert len(s["per_item"]) == 2
     for row in s["per_item"]:
         assert "theta_mean" in row
         assert "p_best" in row
+    # verdict_distribution_btd reflects the collapsed 3-level
+    # observation counts: 2 LEFT-class observations (LEFT_STRONG +
+    # LEFT), 1 TIE, 2 RIGHT-class observations (RIGHT + RIGHT_STRONG).
+    vd = s["verdict_distribution_btd"]
+    assert vd["left_wins"] == 2
+    assert vd["tie"] == 1
+    assert vd["right_wins"] == 2
+
+
+# ---- malformed verdict handling --------------------------------------------
+
+def test_malformed_verdict_fails_loudly():
+    """An unknown verdict string passed to run_tournament raises a
+    ValueError with a clear message. The 3-level default rejects
+    LEFT_STRONG / RIGHT_STRONG at validation time so the user
+    knows immediately rather than at fit time.
+    """
+    from pairwise_rank import run_tournament
+    def bad_judge(left, right):
+        return "FOOBAR"
+    with pytest.raises(ValueError, match="invalid verdict"):
+        run_tournament(["a", "b"], bad_judge, repeats=1)
+

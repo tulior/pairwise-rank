@@ -446,7 +446,7 @@ discarded, and the per-cell counts already say what needs to be
 said. The BTD on a two-candidate tournament is a presentation
 choice, not a statistical necessity.
 
-## 9. Model choice: direct, Davidson/BTD, ordinal models
+## 9. Model choice: direct and Davidson/BTD
 
 The model choice is driven by the measurement, not by what
 statistics happen to be available.
@@ -457,12 +457,9 @@ two-candidate matched question
 
 multi-candidate LEFT/TIE/RIGHT tournament
 -> direct summaries + Davidson / Bradley-Terry-Davidson global model
-
-genuinely ordinal intensity data
--> ordered-logistic model
 ```
 
-Three model classes, with their actual roles:
+Two model classes, with their actual roles:
 
 - **Direct counterbalanced tally.** No model. Wins, losses, ties,
   tie-adjusted score. Always report. For a two-candidate
@@ -476,21 +473,17 @@ Three model classes, with their actual roles:
   multi-candidate LEFT/TIE/RIGHT tournaments. Reports θ, P(best),
   P(top-k), expected rank, and β_right (the position effect, on
   a log-odds scale).
-- **Ordered logistic / M0.** Treats an ordinal 5-level verdict
-  scale as the response. Use **only** when the ordinal intensity
-  is genuinely part of the measurement — when the difference
-  between, say, "slight right preference" and "strong right
-  preference" carries information the BTD's TIE category cannot
-  represent. In a 3-level LEFT/TIE/RIGHT protocol, M0 is not the
-  right tool. The 5-level protocol and the M0 model are part of
-  the same legacy path; the default today is BTD on the 3-level
-  verdicts.
 
-Choosing among them is a measurement question, not a statistical
-completeness question. "We have ordinal verdicts and a fancy model
-that uses them" is not a reason to prefer M0. The question is
-whether the ordinal level carries information the BTD's TIE
-category is failing to capture.
+Legacy 5-level verdicts (LEFT_STRONG, RIGHT_STRONG) are accepted
+as input by `run_tournament(verdict_levels=VERDICT_LEVELS_5)` and
+collapsed to ordinary wins/losses on ingest by `fit_btd` and
+`direct_summary`. No 5-level inference is performed: STRONG is
+treated as the underlying win/loss, and the 3-level scale carries
+all the model structure. This decision is supported by the
+empirical observation that STRONG verdicts occur in ≤ 2% of
+non-ties across all tournaments we have run, and the 3-level and
+5-level inferences agree at r_θ > 0.99 and r_P(best) > 0.99 when
+both are computed on the same data.
 
 For position-effect reporting, the relevant quantity is `beta_right`
 on the log-odds scale. A positive value means the judge tends to
