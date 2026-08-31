@@ -63,7 +63,7 @@ def test_run_tournament_skips_existing_keys():
     # Full schedule for 2 items, 2 repeats: 4 cells
     #   (a, b, a, b, 1) (a, b, a, b, 2) (a, b, b, a, 1) (a, b, b, a, 2)
     # Existing: one of them
-    existing = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="RIGHT")]
+    existing = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="RIGHT", reasoning="")]
     called_keys = []
 
     def judge(left, right):
@@ -161,28 +161,29 @@ def test_reasoning_survives_save_load(tmp_path):
     assert loaded[0].reasoning == obs[0].reasoning
 
 
-def test_load_backfills_missing_reasoning_with_default(tmp_path):
-    """Rows written before the reasoning field was added still load."""
+def test_load_rejects_missing_field(tmp_path):
+    """The loader is strict: missing fields fail loudly. Sole-user
+    codebase does not preserve backward compatibility for old rows."""
     p = tmp_path / "obs.jsonl"
-    # Hand-write a row that omits the reasoning key, simulating old data.
+    # Row omits the reasoning field.
     p.write_text(
-        '{"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, "verdict": "TIE"}\n'
+        '{"a": "a", "b": "b", "left": "a", "right": "b", '
+        '"repeat": 1, "verdict": "TIE"}\n'
     )
-    loaded = load_observations_jsonl(p)
-    assert len(loaded) == 1
-    assert loaded[0].reasoning == ""
+    with pytest.raises(TypeError):
+        load_observations_jsonl(p)
 
 
-def test_load_ignores_unknown_keys(tmp_path):
-    """Forward compatibility: a row with an extra unknown key still loads."""
+def test_load_rejects_unknown_field(tmp_path):
+    """The loader is strict: extra fields fail loudly. Sole-user
+    codebase does not preserve forward compatibility for new fields."""
     p = tmp_path / "obs.jsonl"
     p.write_text(
         '{"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, '
         '"verdict": "TIE", "reasoning": "ok", "future_field": 42}\n'
     )
-    loaded = load_observations_jsonl(p)
-    assert len(loaded) == 1
-    assert loaded[0].reasoning == "ok"
+    with pytest.raises(TypeError):
+        load_observations_jsonl(p)
 
 
 def test_reasoning_does_not_affect_dedup():
@@ -219,7 +220,7 @@ def test_reasoning_does_not_affect_fit(tmp_path):
     from pairwise_rank import fit_btd
 
     base = [Observation(
-        a="a", b="b", left="a", right="b", repeat=r, verdict="RIGHT",
+        a="a", b="b", left="a", right="b", repeat=r, verdict="RIGHT", reasoning="",
     ) for r in range(1, 7)]
     with_reasoning = [
         Observation(**{**o.__dict__, "reasoning": f"trace for repeat {o.repeat}"})
@@ -284,8 +285,8 @@ def test_5level_data_on_disk_loads_fine():
     from pathlib import Path
     import tempfile
     rows = [
-        {"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, "verdict": "LEFT_STRONG"},
-        {"a": "a", "b": "b", "left": "b", "right": "a", "repeat": 1, "verdict": "TIE"},
+        {"a": "a", "b": "b", "left": "a", "right": "b", "repeat": 1, "verdict": "LEFT_STRONG", "reasoning": ""},
+        {"a": "a", "b": "b", "left": "b", "right": "a", "repeat": 1, "verdict": "TIE", "reasoning": ""},
     ]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for r in rows:

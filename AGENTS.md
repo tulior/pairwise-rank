@@ -465,6 +465,33 @@ ambiguous, ask. If the answer is obvious, do it.
 The test: would the user be surprised by what I'm about to
 do? If yes, ask. If no, do it.
 
+### No compatibility shims by default
+
+The repo has a single user. Do not add backward- or
+forward-compatibility shims unless explicitly asked. Examples
+of what to drop on sight:
+
+- "Rows written before this field existed load with an
+  empty string" — drop the backfill and the optional-field
+  machinery. Make the loader strict; missing or extra keys
+  raise loudly.
+- "Unknown keys are ignored" — drop the silent filter. A
+  JSON row with an extra key should crash on
+  ``Observation(**d)`` so the user notices the schema drift.
+- Any "for future optional field" comment in a load
+  function.
+
+Compatibility shims are not free. They hide schema drift,
+they delay the obvious fix, and they make the code larger
+than the actual data model. The sole-user baseline is:
+every persisted file matches the current dataclass exactly,
+and a mismatch is a bug to fix, not a row to backfill.
+
+If a real migration is needed (changing the on-disk format
+in a way that would break an existing file), write a
+one-shot migration script. Do not add silent compat in the
+load path.
+
 ---
 
 ## 12. Optional large-N design layer

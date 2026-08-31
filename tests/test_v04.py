@@ -37,6 +37,7 @@ from pairwise_rank import (
 def _obs(a, b, left, right, verdict, repeat=1):
     return Observation(
         a=a, b=b, left=left, right=right, repeat=repeat, verdict=verdict,
+        reasoning="",
     )
 
 

@@ -13,7 +13,7 @@ from pairwise_rank.btd import fit_btd, summarize_btd, direct_summary, _btd_code
 
 def _obs(a, b, left, right, verdict_code, repeat=1):
     name = ["LEFT_STRONG", "LEFT", "TIE", "RIGHT", "RIGHT_STRONG"][verdict_code]
-    return Observation(a=a, b=b, left=left, right=right, repeat=repeat, verdict=name)
+    return Observation(a=a, b=b, left=left, right=right, repeat=repeat, verdict=name, reasoning="")
 
 
 # 1. STRONG collapsing

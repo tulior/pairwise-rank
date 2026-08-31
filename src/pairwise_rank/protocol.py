@@ -40,7 +40,7 @@ a provider abstraction. Those are the caller's job. The canonical
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Tuple, Union
 
@@ -120,9 +120,8 @@ class Observation:
       verdict: one of VERDICT_LEVELS, or empty string if not yet judged.
       reasoning: free-form audit metadata (e.g. the model's reasoning
                  text). Stored alongside the verdict but ignored by the
-                 ranking model. Default empty string for backward
-                 compatibility with rows written before this field
-                 existed.
+                 ranking model. Default empty string when the judge
+                 returns a bare verdict (no reasoning).
     """
 
     a: str
@@ -130,8 +129,8 @@ class Observation:
     left: str
     right: str
     repeat: int
+    reasoning: str
     verdict: str = ""
-    reasoning: str = ""
 
 
 def observation_key(obs: Observation) -> tuple:
@@ -168,7 +167,8 @@ def make_schedule(candidate_ids: list[str], repeats: int) -> list[Observation]:
             for left, right in ((a, b), (b, a)):
                 for r in range(1, repeats + 1):
                     out.append(Observation(
-                        a=a, b=b, left=left, right=right, repeat=r, verdict="",
+                        a=a, b=b, left=left, right=right, repeat=r,
+                        verdict="", reasoning="",
                     ))
     return out
 
@@ -231,12 +231,6 @@ def run_tournament(
 # JSON Lines persistence
 # ----------------------------------------------------------------------------
 
-# Names of fields that the on-disk row format may omit for backward
-# compatibility. Each missing field is backfilled with its dataclass
-# default.
-_OPTIONAL_FIELDS = {"reasoning"}
-
-
 def save_observations_jsonl(path: Path, observations: Iterable[Observation]) -> None:
     """Write observations as JSON Lines, one row per line."""
     with open(path, "w") as f:
@@ -247,11 +241,12 @@ def save_observations_jsonl(path: Path, observations: Iterable[Observation]) -> 
 def load_observations_jsonl(path: Path) -> list[Observation]:
     """Load observations from a JSON Lines file.
 
-    Rows written before the `reasoning` field was added (or any
-    future optional field) load with the dataclass default for the
-    missing key. Unknown keys in the row are ignored.
+    Every row must contain every field of ``Observation``. Missing
+    or extra fields raise ``TypeError``. The sole-user codebase
+    does not preserve backward or forward compatibility for
+    observation rows; the file format is whatever the current
+    code writes.
     """
-    valid_fields = {f.name for f in fields(Observation)}
     out: list[Observation] = []
     with open(path) as f:
         for line in f:
@@ -259,12 +254,6 @@ def load_observations_jsonl(path: Path) -> list[Observation]:
             if not line:
                 continue
             d = json.loads(line)
-            # Backfill any optional field the row omits.
-            for k in _OPTIONAL_FIELDS:
-                d.setdefault(k, "")
-            # Drop keys the dataclass doesn't know about, so adding
-            # new fields in the future doesn't break old loaders.
-            d = {k: v for k, v in d.items() if k in valid_fields}
             out.append(Observation(**d))
     return out
 

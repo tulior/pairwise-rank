@@ -605,7 +605,8 @@ def _existing_observations_for_pairs(
         for left, right in ((lo, hi), (hi, lo)):
             for r in range(1, int(repeats) + 1):
                 schedule.append(Observation(
-                    a=lo, b=hi, left=left, right=right, repeat=r, verdict="",
+                    a=lo, b=hi, left=left, right=right, repeat=r,
+                    verdict="", reasoning="",
                 ))
     done = {(o.a, o.b, o.left, o.right, o.repeat) for o in existing}
     return [o for o in schedule

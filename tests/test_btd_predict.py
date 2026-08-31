@@ -14,7 +14,7 @@ from pairwise_rank import Observation, predict_btd, fit_btd, summarize_btd
 
 def _obs(a, b, left, right, verdict_code, repeat=1):
     name = ["LEFT_STRONG", "LEFT", "TIE", "RIGHT", "RIGHT_STRONG"][verdict_code]
-    return Observation(a=a, b=b, left=left, right=right, repeat=repeat, verdict=name)
+    return Observation(a=a, b=b, left=left, right=right, repeat=repeat, verdict=name, reasoning="")
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ def test_predict_btd_skips_empty_verdicts():
     """Observations with empty verdicts are skipped, not crashed on."""
     obs = [
         _obs("a", "b", "a", "b", 3, 1),
-        Observation(a="a", b="b", left="a", right="b", repeat=2, verdict=""),
+        Observation(a="a", b="b", left="a", right="b", repeat=2, verdict="", reasoning=""),
     ]
     result = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
     preds = predict_btd(result, obs)
@@ -108,7 +108,7 @@ def test_predict_btd_rejects_unknown_item():
     """Items not in the fit should raise ValueError."""
     obs = [_obs("a", "b", "a", "b", 3, 1)]
     result = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
-    bad = [Observation(a="a", b="z", left="a", right="z", repeat=1, verdict="LEFT")]
+    bad = [Observation(a="a", b="z", left="a", right="z", repeat=1, verdict="LEFT", reasoning="")]
     with pytest.raises(ValueError, match="not in fit.item_ids"):
         predict_btd(result, bad)
 
