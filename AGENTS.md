@@ -226,29 +226,41 @@ misspecification, not non-transitivity.
 
 ## 7. Testing
 
-The full test suite runs the four statistical files plus two
-provider files:
+The full test suite runs the four statistical files plus the
+design layer and two provider files:
 
 ```
 tests/test_btd.py             (BTD model invariants, vectorized helpers)
 tests/test_btd_predict.py    (per-cell BTD likelihood predictions)
 tests/test_protocol.py        (schedule, dedup, verdict collapse, JSONL)
 tests/test_v04.py             (default 3-level + legacy 5-level collapse)
+tests/test_design.py          (adaptive design layer pure functions)
+tests/test_design_orchestrator.py  (orchestrator end-to-end, slow)
 tests/test_providers/test_base.py      (connector base types)
 tests/test_providers/test_MiniMax.py   (MiniMax connector contract)
 ```
 
 In execution-time-constrained environments, run the four
-statistical files in 4 sequential batches of approximately 2
-minutes each. Provider tests are fast (<10 s total) and can
-be run in a single command at any time.
+statistical files plus the pure design tests in 5 sequential
+batches of approximately 2 minutes each. The orchestrator file
+is the only place the design layer touches PyMC and is
+excluded from the default split. Provider tests are fast
+(<10 s total) and can be run in a single command at any time.
 
 ```
 PYTHONPATH=src pytest tests/test_btd.py
 PYTHONPATH=src pytest tests/test_btd_predict.py
 PYTHONPATH=src pytest tests/test_protocol.py
 PYTHONPATH=src pytest tests/test_v04.py
+PYTHONPATH=src pytest tests/test_design.py
 PYTHONPATH=src pytest tests/test_providers
+```
+
+To validate the orchestrator end-to-end, run the
+orchestrator test file directly:
+
+```
+PYTHONPATH=src pytest tests/test_design_orchestrator.py
 ```
 
 PyMC sampling dominates wall time. Do not parallelize across
@@ -452,6 +464,46 @@ ambiguous, ask. If the answer is obvious, do it.
 
 The test: would the user be surprised by what I'm about to
 do? If yes, ask. If no, do it.
+
+---
+
+## 12. Optional large-N design layer
+
+`pairwise_rank.design` is an opt-in experimental-design
+layer on top of the existing BTD model. It does not change
+the statistical model.
+
+Policy:
+
+- The design layer is opt-in. The default small-N use case
+  is unchanged. The top-level `pairwise_rank` import does
+  not re-export the design surface; callers import from
+  `pairwise_rank.design` explicitly.
+- The design layer must not introduce another likelihood,
+  sampler, or provider. If a new design appears to need a
+  new model, the right fix is to add the new model, not to
+  hide it inside the design layer.
+- The planner selects **unordered** pairs. Orientation is
+  `protocol.py`'s job. The acquisition score uses only
+  position-neutral posterior quantities
+  (`P(theta_i > theta_j)` and `P(best = i)`).
+- The small-N threshold is `N <= 12`. Below that, complete
+  round robin is cheaper than a few BTD refits under the
+  sparse bootstrap. The threshold is an engineering
+  constant, not a theorem, and is documented but not
+  enforced inside `select_frontier_batch`; callers opt
+  in to adaptive mode explicitly.
+- A budget stop returns the current credible set even if
+  unstable. Confidence is never fabricated.
+- The orchestrator `run_adaptive_best_set` is the only
+  place the design layer touches PyMC. The default
+  5-batch test split excludes it for that reason; run
+  `tests/test_design_orchestrator.py` directly to
+  validate end-to-end.
+
+The full design and the empirical audit live in
+`EXPERIMENT_DESIGN.md` §21 and
+`experiments/design_validation/REPORT.md`.
 
 ---
 

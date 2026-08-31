@@ -1,0 +1,23 @@
+{
+  "draws": 200,
+  "tune": 200,
+  "chains": 2,
+  "degree": 6,
+  "results": [
+    {
+      "n_items": 32,
+      "n_unordered_pairs": 96,
+      "draws": 200,
+      "tune": 200,
+      "chains": 2,
+      "target_accept": 0.95,
+      "wall_time_s": 330.7016339302063,
+      "divergences": 0,
+      "max_rhat": NaN,
+      "min_bulk_ess": NaN,
+      "min_tail_ess": NaN,
+      "success": true,
+      "error": null
+    }
+  ]
+}

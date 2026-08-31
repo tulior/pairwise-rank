@@ -1228,3 +1228,217 @@ likelihood. The model-falsification audit in
 `experiments/model_falsification/MODEL_FALSIFICATION.md` is
 the standing evidence that the richer models considered so
 far do not earn their complexity at the project scale.
+
+---
+
+## 21. Optional large-N adaptive comparison design
+
+The small-N scaling boundary in §20 makes a clear claim: do
+not increase model complexity to solve an experimental-design
+problem. The corollary is that when the candidate set is too
+large for a complete round robin to be cheap, the right answer
+is to design the comparisons more carefully — not to swap
+the model.
+
+This section describes the optional large-N design path
+implemented in `pairwise_rank.design`. The design layer is
+opt-in. It does not modify `btd.py`, `protocol.py`, or any
+provider. The statistical model is the existing Bayesian
+Davidson. The design layer is a thin experimental-design
+layer on top.
+
+### Principle
+
+```
+likelihood pools evidence
+design buys evidence
+```
+
+The likelihood in `btd.py` is the only place latent strengths
+are estimated. The design layer in `design.py` decides which
+pairs to compare next and when to stop. The two layers are
+separable: the design layer is driven by the BTD posterior
+summaries and is meaningless without them, but the BTD
+likelihood is unchanged whether or not the design layer is
+used.
+
+### The optional large-N path
+
+```
+sparse connected bootstrap
+    -> Davidson posterior
+    -> decision-relevant frontier sampling
+    -> credible best set
+    -> stability / budget stop
+```
+
+Each step is a single purpose:
+
+1. **Sparse connected bootstrap**: a degree-6 shuffled
+   circulant graph gives every item roughly equal coverage
+   with `O(N * degree / 2)` unordered pairs instead of
+   `O(N^2)` for complete round robin. For N=1000, that is
+   ~3000 pairs instead of ~500000.
+
+2. **Davidson posterior**: the existing `fit_btd` is run on
+   the accumulated observations. The position-neutral
+   `p_best` and the position-neutral pairwise
+   `P(theta_i > theta_j)` are the two design summaries.
+
+3. **Decision-relevant frontier sampling**: an acquisition
+   heuristic scores every pair `(i, j)` in the exploration
+   pool by
+
+   ```
+   score(i, j) =
+       (P(best = i) + P(best = j))
+     * 4 P(theta_i > theta_j) (1 - P(theta_i > theta_j))
+   ```
+
+   The first factor is **relevance** (how much both items
+   matter to the top-K decision, since `P(best = i)` and
+   `P(best = j)` are mutually exclusive posterior events).
+   The second factor is **uncertainty** — the variance of
+   a Bernoulli random variable with parameter
+   `P(theta_i > theta_j)`, peaked at `0.5` and zero at
+   `{0, 1}`.
+
+   This is a transparent heuristic, not a theorem of
+   optimality. It is decision-focused: it spends calls on
+   pairs that are both relevant to the top-K decision AND
+   unresolved in relative strength. It explicitly avoids
+   the long-tail failure where `rank 700 vs rank 701`
+   receives calls merely because `P(theta_700 > theta_701)
+   \approx 0.5`.
+
+   The pool is the credible best set at the wider
+   confidence `1 - (1 - confidence) / 2` (i.e. 0.975 for
+   confidence 0.95). Items outside the pool stop receiving
+   new budget; they remain in the accumulated dataset and
+   can re-enter if the posterior shifts.
+
+4. **Credible best set**: the smallest prefix `S` of items
+   sorted by descending `p_best` whose cumulative mass is
+   at least `confidence`. `k = len(S)` is determined by
+   the posterior, not chosen by the caller. The set is
+   the credible set for the identity of the best
+   candidate, **not** a claim that these are the
+   top-`k` ranked candidates. If `P(best = i) \ge
+   confidence` for a single item, the credible set is
+   `{i}` and `k = 1` naturally.
+
+5. **Stability / budget stop**: stop when the credible
+   set has been the same for `stability_batches`
+   consecutive adaptive fits, or when the
+   `max_unordered_pairs` budget is reached, whichever
+   comes first. Set equality uses `frozenset` identity,
+   not display order. A budget stop returns the current
+   set even if unstable — confidence is never
+   fabricated.
+
+### Position invariance
+
+The design layer selects **unordered** pairs.
+`protocol.py` owns orientation. The acquisition score
+uses only position-neutral posterior quantities
+(`P(theta_i > theta_j)` and `P(best = i)`). The existing
+`beta_right` order effect remains an inference correction
+inside `btd.py`. The planner must not learn to exploit
+slot bias.
+
+### Ties
+
+No tie adapter. The 3-level `LEFT / TIE / RIGHT`
+likelihood already models ties. The planner consumes the
+position-neutral posterior after ties have been modeled.
+A planner that needed its own tie handling would imply
+the model layer is wrong; that is a different problem.
+
+### Small-N threshold (N <= 12)
+
+For `N <= 12`, complete round robin is cheap. The design
+layer is not the right tool: the bootstrap graph covers
+~12 * 6 / 2 = 36 unordered pairs, but complete round
+robin at N=12 is 66 pairs and is fit-friendly. The
+`N <= 12` threshold is an engineering constant, not a
+theorem — it reflects the point at which `O(N^2)`
+becomes more expensive than a few BTD refits under a
+sparse initial graph. The threshold is documented but
+not enforced inside `select_frontier_batch`; callers opt
+in to adaptive mode explicitly.
+
+### Computational complexity
+
+The bootstrap is `O(N * degree)` calls. The adaptive
+pair scoring is `O(M^2)` where `M` is the size of the
+exploration frontier, not necessarily `N`. At N=1000 a
+full `1000 * 1000` pairwise probability matrix is only
+~1e6 entries and is acceptable numerically, but the
+frontier `M` is typically much smaller than `N`.
+
+### N=1000 fitting check
+
+Pair selection scales to N=1000. The existing
+UNMODIFIED `fit_btd` does not. The benchmark in
+`experiments/design_validation/nuts_benchmark.py` records
+wall time at N=32, 100, 300, 1000. If `fit_btd` is
+impractical at N=1000, the simulation audit reports the
+limiting component honestly:
+
+```
+adaptive comparison DESIGN scales to N=1000;
+current full Bayesian FIT is the limiting component.
+```
+
+That is a separate decision, not a task of the design
+layer. Do not hide the bottleneck by silently
+introducing VI, MAP, Laplace, or another model. The
+principle in §20 still applies: solve comparison
+allocation before reconsidering the likelihood.
+
+### Empirical results
+
+See `experiments/design_validation/REPORT.md` for the
+audit comparing complete round robin, fixed degree-6
+sparse graph, and adaptive frontier design at N=32 (and
+N=100, 300 if computationally tractable in the sandbox).
+The headline correctness metric is COVERAGE: the
+fraction of repeated simulations in which the true best
+is inside the returned 95% credible set. The nominal
+target is approximately 0.95 if model and calibration
+assumptions hold.
+
+If the simulation audit reveals that:
+
+- the empirical 95% coverage is materially below 0.95
+- adaptive acquisition performs worse than fixed sparse
+  screening at the same coverage
+- the design complexity does not buy meaningful call
+  savings
+- `fit_btd` makes the large-N workflow operationally
+  useless
+
+the design layer is not the right tool. Stop and
+re-evaluate. Do not repair those failures by adding
+another model; that would violate §20.
+
+### Reference
+
+The module `pairwise_rank.design` exposes:
+
+```
+AdaptiveBestSetConfig
+AdaptiveBestSetState
+AdaptiveBestSetResult
+credible_best_set
+make_sparse_bootstrap
+select_frontier_batch
+should_stop_adaptive
+run_adaptive_best_set          (optional orchestrator)
+```
+
+The pure functions do not import PyMC. The orchestrator
+`run_adaptive_best_set` is the only place the design
+layer touches the sampler, and it is excluded from the
+default 5-batch test split (see `AGENTS.md` §7) because
+PyMC sampling dominates wall time.
