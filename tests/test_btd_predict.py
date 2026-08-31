@@ -136,8 +136,13 @@ def test_summarize_btd_includes_divergences_field():
     result = _fit_small_two_item()
     s = summarize_btd(result)
     assert "divergences" in s
-    assert isinstance(s["divergences"], int)
-    assert s["divergences"] >= 0
+    # The field is present and is either an int (count) or None
+    # (sampler backend did not report divergences). It is never
+    # silently coerced to 0 on a read failure -- a None value
+    # signals "unverified", not "0 = healthy".
+    assert s["divergences"] is None or isinstance(s["divergences"], int)
+    if isinstance(s["divergences"], int):
+        assert s["divergences"] >= 0
 
 
 def test_summarize_btd_includes_rhat_ess_fields():
@@ -157,11 +162,62 @@ def test_btd_fit_result_exposes_divergences():
     """The BTDFitResult dataclass should carry divergences directly."""
     result = _fit_small_two_item()
     assert hasattr(result, "divergences")
-    assert isinstance(result.divergences, int)
-    assert result.divergences >= 0
+    # The field is int | None; never silently 0 on a read failure.
+    assert result.divergences is None or isinstance(result.divergences, int)
+    if isinstance(result.divergences, int):
+        assert result.divergences >= 0
     # And the summarize_btd output should match
     s = summarize_btd(result)
     assert s["divergences"] == result.divergences
+
+
+def test_divergences_none_means_unverified_not_zero():
+    """When the sampler backend does not report divergences, the
+    field is None -- the package convention for "unavailable" --
+    and is NOT coerced to 0. A None value is a red flag that the
+    fit is unverified for geometry, not a pass.
+    """
+    # Run a real fit, then force the divergences field to None to
+    # simulate what fit_btd would produce if the sampler backend
+    # did not report a divergences field. This exercises the
+    # summarize_btd path end-to-end without needing a mock idata.
+    result = _fit_small_two_item()
+    result.divergences = None
+    s = summarize_btd(result)
+    assert s["divergences"] is None
+    assert "divergences" in s  # key still present, just None
+
+
+def test_divergences_none_consistent_across_dataclass_and_summary():
+    """The dataclass field and the summary output are always
+    consistent -- if one is None, so is the other."""
+    result = _fit_small_two_item()
+    result.divergences = None
+    assert result.divergences is None
+    s = summarize_btd(result)
+    assert s["divergences"] is None
+    assert s["divergences"] == result.divergences
+
+
+def test_divergences_dataclass_default_is_none():
+    """The dataclass default for divergences is None, NOT 0.
+    Constructing a BTDFitResult without explicitly setting
+    divergences should yield None, signalling "unverified" rather
+    than "0 divergent transitions = healthy".
+    """
+    from pairwise_rank.btd import BTDFitResult
+
+    result = _fit_small_two_item()
+    # Build a fresh dataclass using the real idata but with the
+    # default for divergences, to mirror the post-fix fit_btd
+    # contract.
+    fresh = BTDFitResult(
+        idata=result.idata,
+        n=result.n,
+        item_ids=result.item_ids,
+        config=result.config,
+    )
+    assert fresh.divergences is None
 
 
 def test_diagnostic_keys_present_with_position_neutral():

@@ -17,8 +17,6 @@ the v0.4 docs explicitly call out:
   - beta_right > 0 favors the right slot
   - P(best) is computed jointly from posterior draws
   - position-neutral predictions set beta_right = 0
-  - existing ordered-model tests remain green (covered in
-    tests/test_model.py and tests/test_recovery.py)
 """
 from __future__ import annotations
 
@@ -362,44 +360,43 @@ def test_position_neutral_tie_rate_differs_from_unconstrained():
 # ---- tournament score -------------------------------------------------------
 
 def test_tournament_score_tie_adjusted_position_neutral():
-    """direct_summary now returns a tournament_score: half credit
-    for ties, full credit for wins, normalized by N-1.
+    """direct_summary returns a tournament_score: half credit for
+    ties, full credit for wins, normalized by the observed total
+    (W + L + T) for each item.
+
+        score_i = (W_i + 0.5 * T_i) / (W_i + L_i + T_i)
 
     Position-neutral: it does not depend on which slot the item
-    appeared in, only on the verdicts.
+    appeared in, only on the verdicts. Range [0, 1].
     """
     obs = [
-        # a beats b in both orientations -> 2 wins for a, 0 ties
+        # a beats b in both orientations -> 2 wins for a, 0 ties, 0 losses
         _obs("a", "b", "a", "b", "LEFT", 1),
         _obs("a", "b", "b", "a", "RIGHT", 1),
-        # a ties c in both orientations -> 2 ties each
+        # a ties c in both orientations -> 2 ties for a, 0 wins, 0 losses
         _obs("a", "c", "a", "c", "TIE", 1),
         _obs("a", "c", "c", "a", "TIE", 1),
-        # b ties c in both orientations -> 2 ties each
+        # b ties c in both orientations -> 2 ties for b, 0 wins, 0 losses
         _obs("b", "c", "b", "c", "TIE", 1),
         _obs("b", "c", "c", "b", "TIE", 1),
     ]
     d = direct_summary(obs)
     score = d["tournament_score"]
-    # N=3, denom=2.
-    # a: 2 wins (over b) + 2 ties (with c) -> (2 + 1.0) / 2 = 1.5
-    # b: 0 wins + 2 ties (with c) -> 1.0 / 2 = 0.5
-    # c: 0 wins + 2 ties (with a) + 2 ties (with b) -> 2.0 / 2 = 1.0
-    assert abs(score["a"] - 1.5) < 1e-9
-    assert abs(score["b"] - 0.5) < 1e-9
-    assert abs(score["c"] - 1.0) < 1e-9
+    # Per-item W/L/T (each item has 4 obs in this fixture):
+    #   a: W=2 (vs b), T=2 (vs c), L=0     -> (2 + 1.0) / 4 = 0.75
+    #   b: W=0,         T=2 (vs c), L=2 (vs a) -> (0 + 1.0) / 4 = 0.25
+    #   c: W=0,         T=4 (vs a + b), L=0    -> (0 + 2.0) / 4 = 0.5
+    assert abs(score["a"] - 0.75) < 1e-9
+    assert abs(score["b"] - 0.25) < 1e-9
+    assert abs(score["c"] - 0.5) < 1e-9
 
 
 def test_tournament_score_for_undefeated_item():
-    """An undefeated item that wins everything gets a score above 1.0.
+    """An undefeated item that wins every observation gets exactly 1.0.
 
-    With N=3, the maximum score is (2 wins + 0.5*0 ties) / 2 = 1.0
-    if the item wins both opponents with no ties, or higher if it
-    also ties. The score is normalized by N-1 and bounded above by
-    N-1 (when an item wins every obs, including ties scored as 0.5).
-
-    Concretely: a beats b and c in both orientations -> 4 wins, 0 ties.
-    Score = 4 / 2 = 2.0.
+    With N=3 and K=1 repeat per orientation, each item has 4
+    observations. If a wins all 4 of its observations, W=4, L=0,
+    T=0, so score = 4 / 4 = 1.0 (the maximum).
     """
     obs = [
         # a beats b in both orientations
@@ -413,18 +410,150 @@ def test_tournament_score_for_undefeated_item():
         _obs("b", "c", "c", "b", "TIE", 1),
     ]
     d = direct_summary(obs)
-    # a: 4 wins (over b in 2 obs + over c in 2 obs), 0 ties.
-    # score = (4 + 0) / 2 = 2.0
-    assert abs(d["tournament_score"]["a"] - 2.0) < 1e-9
+    # a: W=4, L=0, T=0 -> score = (4 + 0) / 4 = 1.0
+    assert abs(d["tournament_score"]["a"] - 1.0) < 1e-9
 
 
-# ---- sanity: existing 5-level workflow still works -------------------------
+# ---- tournament score invariants -------------------------------------------
 
-def test_existing_5level_workflow_unchanged():
-    """A user who calls fit_ordinal on 5-level data still gets the
-    ordered logit, and the model name in the docstring is correct.
+def test_tournament_score_all_wins_is_one():
+    """An item that wins every observation has score 1.0."""
+    obs = [
+        # a wins everything; b and c exist for context but tie each other
+        _obs("a", "b", "a", "b", "LEFT", 1),
+        _obs("a", "b", "b", "a", "RIGHT", 1),
+        _obs("a", "c", "a", "c", "LEFT", 1),
+        _obs("a", "c", "c", "a", "RIGHT", 1),
+        _obs("b", "c", "b", "c", "TIE", 1),
+        _obs("b", "c", "c", "b", "TIE", 1),
+    ]
+    score = direct_summary(obs)["tournament_score"]
+    assert abs(score["a"] - 1.0) < 1e-9
+
+
+def test_tournament_score_all_losses_is_zero():
+    """An item that loses every observation has score 0.0."""
+    obs = [
+        # a loses to both b and c in both orientations
+        _obs("a", "b", "a", "b", "RIGHT", 1),
+        _obs("a", "b", "b", "a", "LEFT", 1),
+        _obs("a", "c", "a", "c", "RIGHT", 1),
+        _obs("a", "c", "c", "a", "LEFT", 1),
+        # b vs c irrelevant for a
+        _obs("b", "c", "b", "c", "TIE", 1),
+        _obs("b", "c", "c", "b", "TIE", 1),
+    ]
+    score = direct_summary(obs)["tournament_score"]
+    assert abs(score["a"] - 0.0) < 1e-9
+
+
+def test_tournament_score_all_ties_is_one_half():
+    """An item that ties every observation has score 0.5."""
+    obs = [
+        # a ties b in both orientations, ties c in both orientations
+        _obs("a", "b", "a", "b", "TIE", 1),
+        _obs("a", "b", "b", "a", "TIE", 1),
+        _obs("a", "c", "a", "c", "TIE", 1),
+        _obs("a", "c", "c", "a", "TIE", 1),
+        # b vs c irrelevant for a
+        _obs("b", "c", "b", "c", "LEFT", 1),
+        _obs("b", "c", "c", "b", "RIGHT", 1),
+    ]
+    score = direct_summary(obs)["tournament_score"]
+    # a: W=0, L=0, T=4 -> (0 + 2.0) / 4 = 0.5
+    assert abs(score["a"] - 0.5) < 1e-9
+
+
+def test_tournament_score_always_in_unit_interval():
+    """Every per-item score lies in [0, 1] for any well-formed input."""
+    obs = [
+        # mixed outcomes, asymmetric across orientations
+        _obs("a", "b", "a", "b", "LEFT", 1),
+        _obs("a", "b", "b", "a", "TIE", 1),
+        _obs("a", "c", "a", "c", "RIGHT", 1),
+        _obs("a", "c", "c", "a", "LEFT", 1),
+        _obs("b", "c", "b", "c", "TIE", 1),
+        _obs("b", "c", "c", "b", "RIGHT", 1),
+    ]
+    score = direct_summary(obs)["tournament_score"]
+    for item, s in score.items():
+        assert s is not None
+        assert 0.0 <= s <= 1.0, f"score[{item!r}] = {s} not in [0, 1]"
+
+
+def test_tournament_score_matches_observed_count_formula():
+    """score_i == (W + 0.5*T) / (W + L + T) for every item, computed
+    from the per-item win/loss/tie tallies that direct_summary also
+    returns. This pins the definition independently of any specific
+    fixture."""
+    obs = [
+        # deliberately asymmetric and incomplete
+        _obs("a", "b", "a", "b", "LEFT", 1),
+        _obs("a", "b", "b", "a", "RIGHT", 1),
+        _obs("a", "b", "a", "b", "TIE", 2),
+        _obs("a", "c", "a", "c", "RIGHT", 1),
+        _obs("a", "c", "c", "a", "TIE", 1),
+        _obs("b", "c", "b", "c", "TIE", 1),
+        _obs("b", "c", "c", "b", "TIE", 2),
+    ]
+    d = direct_summary(obs)
+    per = d["per_item"]
+    for item, s in d["tournament_score"].items():
+        w = per["wins"].get(item, 0)
+        l = per["losses"].get(item, 0)
+        t = per["ties"].get(item, 0)
+        denom = w + l + t
+        expected = (w + 0.5 * t) / denom if denom > 0 else None
+        assert abs(s - expected) < 1e-12, (
+            f"score[{item!r}] = {s} but (W+L+T) formula gives {expected} "
+            f"(W={w}, L={l}, T={t})"
+        )
+
+
+def test_tournament_score_complete_balanced_agrees_with_2K_N_minus_1():
+    """For a complete balanced tournament (both orientations, K repeats),
+    the observed-count denominator equals 2*K*(N-1) and the two
+    formulas agree exactly. This pins the equivalence documented in
+    EXPERIMENT_DESIGN.md §8.
     """
-    from pairwise_rank import fit_ordinal, summarize
+    n = 4
+    k = 3
+    items = ["a", "b", "c", "d"]
+    # Complete balanced: every ordered pair, K repeats, both orientations.
+    # Use TIE for all observations so all items have identical W/L/T.
+    obs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = items[i], items[j]
+            for r in range(1, k + 1):
+                obs.append(_obs(a, b, a, b, "TIE", r))
+                obs.append(_obs(a, b, b, a, "TIE", r))
+    d = direct_summary(obs)
+    per = d["per_item"]
+    expected_denom = 2 * k * (n - 1)  # = 18
+    for item in items:
+        w = per["wins"].get(item, 0)
+        l = per["losses"].get(item, 0)
+        t = per["ties"].get(item, 0)
+        # observed count
+        s_observed = d["tournament_score"][item]
+        # explicit 2*K*(N-1) denominator formula
+        s_design = (w + 0.5 * t) / expected_denom if expected_denom > 0 else None
+        # W+L+T must equal expected_denom in the complete balanced design
+        assert w + l + t == expected_denom
+        assert abs(s_observed - s_design) < 1e-12
+
+
+# ---- sanity: legacy 5-level data still flows through BTD --------------------
+
+def test_legacy_5level_data_fits_via_btd():
+    """Legacy 5-level verdicts (LEFT_STRONG, RIGHT_STRONG) are
+    accepted by fit_btd, collapsed to 3-level, and produce a normal
+    BTD posterior. The M0 ordered-logistic model and its 5-level
+    inference path were removed in v0.5; legacy data must work
+    through the supported path.
+    """
+    from pairwise_rank import fit_btd, summarize_btd
     obs = [
         _obs("a", "b", "a", "b", "LEFT_STRONG", 1),
         _obs("a", "b", "a", "b", "LEFT", 2),
@@ -432,10 +561,33 @@ def test_existing_5level_workflow_unchanged():
         _obs("a", "b", "a", "b", "RIGHT", 1),
         _obs("a", "b", "a", "b", "RIGHT_STRONG", 2),
     ]
-    res = fit_ordinal(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
-    s = summarize(res)
+    res = fit_btd(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
+    s = summarize_btd(res, observations=obs)
     # Both items have theta and P(best)
     assert len(s["per_item"]) == 2
     for row in s["per_item"]:
         assert "theta_mean" in row
         assert "p_best" in row
+    # verdict_distribution_btd reflects the collapsed 3-level
+    # observation counts: 2 LEFT-class observations (LEFT_STRONG +
+    # LEFT), 1 TIE, 2 RIGHT-class observations (RIGHT + RIGHT_STRONG).
+    vd = s["verdict_distribution_btd"]
+    assert vd["left_wins"] == 2
+    assert vd["tie"] == 1
+    assert vd["right_wins"] == 2
+
+
+# ---- malformed verdict handling --------------------------------------------
+
+def test_malformed_verdict_fails_loudly():
+    """An unknown verdict string passed to run_tournament raises a
+    ValueError with a clear message. The 3-level default rejects
+    LEFT_STRONG / RIGHT_STRONG at validation time so the user
+    knows immediately rather than at fit time.
+    """
+    from pairwise_rank import run_tournament
+    def bad_judge(left, right):
+        return "FOOBAR"
+    with pytest.raises(ValueError, match="invalid verdict"):
+        run_tournament(["a", "b"], bad_judge, repeats=1)
+

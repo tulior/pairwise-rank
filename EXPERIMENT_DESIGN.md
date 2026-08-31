@@ -394,21 +394,41 @@ be right.
 For multi-candidate tournaments, report both:
 
 - **Direct counterbalanced evidence.** Wins, losses, ties, and a
-  tie-adjusted tournament score per item. For a complete balanced
-  tournament with both orientations and K repeats, the per-item
-  probability-like score is
+  tie-adjusted tournament score per item. The per-item
+  probability-like score is computed from the *observed* tallies
+  (W = wins, L = losses, T = ties across every orientation and
+  every repeat that was actually observed for the item):
+
+  ```
+  S_i^direct = (W_i + 0.5 * T_i) / (W_i + L_i + T_i)
+  ```
+
+  Range [0, 1], position-neutral (does not depend on which slot
+  the item appeared in):
+
+  - all wins    -> 1.0
+  - all losses  -> 0.0
+  - all ties    -> 0.5
+  - mixed       -> strictly between 0 and 1
+
+  For a complete balanced tournament with both orientations and K
+  repeats per orientation, the observed denominator equals
+  `2 * K * (N - 1)` and this is exactly equivalent to
 
   ```
   S_i^direct = (W_i + 0.5 * T_i) / (2 * K * (N - 1))
   ```
 
-  range [0, 1], position-neutral (does not depend on which slot
-  the item appeared in). The denominator is `2 * K * (N - 1)`
-  because each item faces the other `N - 1` items in `K` repeats
-  on each side, and the maximum possible `(W + 0.5 * T)` is
-  `2 * K * (N - 1)`. Divide by `K * (N - 1)` instead and the
-  statistic lives on [0, 2] and is a different quantity. Watch
-  the denominator.
+  but the observed-count form is preferred because it is
+  well-defined on incomplete, resumed, or filtered data sets
+  where some orientations or repeats are missing. The previous
+  `direct_summary` implementation divided by `N - 1` only,
+  which produced a [0, K] statistic for K repeats per pair; the
+  observed-count form is the corrected contract.
+
+  Items with no observations at all are reported with a score of
+  `None` (the package convention for an unavailable per-item
+  summary; cf. `summarize_btd`'s `max_rhat=None` fallback).
 - **A global latent-strength model** (typically BTD — see §9).
 
 Disagreement between direct and global is strain, not automatically
@@ -426,7 +446,7 @@ discarded, and the per-cell counts already say what needs to be
 said. The BTD on a two-candidate tournament is a presentation
 choice, not a statistical necessity.
 
-## 9. Model choice: direct, Davidson/BTD, ordinal models
+## 9. Model choice: direct and Davidson/BTD
 
 The model choice is driven by the measurement, not by what
 statistics happen to be available.
@@ -437,12 +457,9 @@ two-candidate matched question
 
 multi-candidate LEFT/TIE/RIGHT tournament
 -> direct summaries + Davidson / Bradley-Terry-Davidson global model
-
-genuinely ordinal intensity data
--> ordered-logistic model
 ```
 
-Three model classes, with their actual roles:
+Two model classes, with their actual roles:
 
 - **Direct counterbalanced tally.** No model. Wins, losses, ties,
   tie-adjusted score. Always report. For a two-candidate
@@ -456,21 +473,17 @@ Three model classes, with their actual roles:
   multi-candidate LEFT/TIE/RIGHT tournaments. Reports θ, P(best),
   P(top-k), expected rank, and β_right (the position effect, on
   a log-odds scale).
-- **Ordered logistic / M0.** Treats an ordinal 5-level verdict
-  scale as the response. Use **only** when the ordinal intensity
-  is genuinely part of the measurement — when the difference
-  between, say, "slight right preference" and "strong right
-  preference" carries information the BTD's TIE category cannot
-  represent. In a 3-level LEFT/TIE/RIGHT protocol, M0 is not the
-  right tool. The 5-level protocol and the M0 model are part of
-  the same legacy path; the default today is BTD on the 3-level
-  verdicts.
 
-Choosing among them is a measurement question, not a statistical
-completeness question. "We have ordinal verdicts and a fancy model
-that uses them" is not a reason to prefer M0. The question is
-whether the ordinal level carries information the BTD's TIE
-category is failing to capture.
+Legacy 5-level verdicts (LEFT_STRONG, RIGHT_STRONG) are accepted
+as input by `run_tournament(verdict_levels=VERDICT_LEVELS_5)` and
+collapsed to ordinary wins/losses on ingest by `fit_btd` and
+`direct_summary`. No 5-level inference is performed: STRONG is
+treated as the underlying win/loss, and the 3-level scale carries
+all the model structure. This decision is supported by the
+empirical observation that STRONG verdicts occur in ≤ 2% of
+non-ties across all tournaments we have run, and the 3-level and
+5-level inferences agree at r_θ > 0.99 and r_P(best) > 0.99 when
+both are computed on the same data.
 
 For position-effect reporting, the relevant quantity is `beta_right`
 on the log-odds scale. A positive value means the judge tends to
@@ -997,3 +1010,435 @@ These heuristics are written for pairwise-comparison tournaments
 in particular, but most generalize. The same trap appears in
 prompt engineering, A/B testing, and human-subject studies:
 optimize the construct first, optimize within it, then stop.
+
+## 20. Scaling boundary: model vs design
+
+The modeling layer and the experimental-design layer are
+different problems. Mixing them is a frequent source of
+unforced complexity.
+
+```
+Do not increase model complexity to solve an experimental-design problem.
+```
+
+The principle is one-directional. A scaling problem in the
+design layer (the candidate set is too large, the comparison
+budget is bounded, the decision is only over the top-k) is
+addressed by changing the design. It is not addressed by
+replacing the ranking likelihood with a more expressive
+model that happens to also reduce something. A misspecification
+problem in the model layer (the likelihood does not match the
+data generating process) is addressed by changing the model.
+It is not addressed by adding a richer likelihood to absorb
+design choices that should have been made explicitly.
+
+### Likelihood vs design
+
+```
+likelihood pools evidence
+design buys evidence
+```
+
+Davidson remains the ranking likelihood. Comparison selection
+is a separate experimental-design problem. The two layers do
+not share a budget and do not share a vocabulary: the
+likelihood is asked to be honest about what the data already
+say, and the design is asked to spend the next comparison
+where it earns the most decision-relevant information.
+
+For small candidate sets, complete counterbalanced round robin
+remains the default because `O(N^2)` is cheap when `N` is
+small. There is no acquisition problem and no reason to add
+acquisition machinery.
+
+A practical engineering boundary, not a theorem:
+
+```
+N ~= 5-8:
+    complete counterbalanced round robin
+    no adaptive pairing machinery
+
+larger fields, roughly N >= 30:
+    consider sparse initialization + adaptive pair selection
+    as a separate design layer consuming the Davidson posterior
+```
+
+The `N >= 30` figure is an engineering boundary where
+adaptive design may start paying for its added complexity.
+It is not a hard cutoff. The actual transition depends on
+the comparison cost, the decision target, the judge latency,
+and the budget. The boundary is reported so the simpler
+default is not abandoned prematurely.
+
+### Three decision modes
+
+The acquisition objective depends on the decision target.
+The selector, if it exists, must know which target it is
+serving.
+
+1. **Small N, full ranking.** Complete counterbalanced round
+   robin. Every pair, both orientations, a small K. The
+   posterior does the work. There is no acquisition problem.
+
+2. **Large N, winner / top-k selection.** The decision target
+   is a small set of candidates at the top. The design is
+   aimed at that target, not at global rank accuracy.
+
+   ```
+   sparse connected initialization
+   -> Davidson fit
+   -> identify uncertain top-k frontier
+   -> compare informative pairs near that frontier
+   -> refit in batches
+   -> eliminate clearly dominated candidates
+   -> stop when decision uncertainty is sufficiently low
+   ```
+
+3. **Large N, accurate full ranking.** The decision target is
+   the ordering of every candidate. The design still has to
+   cover the field, but it does not have to cover it uniformly.
+
+   ```
+   sparse balanced comparison graph
+   -> adaptive comparisons aimed at global rank uncertainty
+   ```
+
+The acquisition objective is different in modes 2 and 3. For
+full ranking (mode 3), close latent strengths can be informative:
+
+```
+|theta_i - theta_j| small
+```
+
+For winner / top-k selection (mode 2), globally choosing the
+closest theta pair is wasteful because it may spend budget
+distinguishing irrelevant low-ranked candidates. For top-k
+selection, prioritize comparisons where both are true:
+
+```
+P(theta_i > theta_j) is near 0.5
+```
+
+and
+
+```
+one or both candidates have meaningful uncertainty about top-k membership
+```
+
+The budget should be spent near the decision boundary, not
+uniformly across all ranks.
+
+### Safeguards
+
+1. **Connectivity first.** Adaptive selection must begin from
+   a connected sparse design. A practical starting point for
+   larger fields is approximately degree 4–6 per item,
+   subject to the actual experiment. The purpose is
+   identifiability and avoiding starvation of poorly sampled
+   candidates. This is a heuristic. Do not hard-code the
+   degree into any API.
+
+2. **Batch adaptation.** Prefer batches of comparisons rather
+   than refitting after every single judgment. A rough
+   operational scale such as 10–30 new comparison cells per
+   batch is reasonable. The number is a heuristic, not a
+   statistical requirement, and depends on judge latency and
+   budget cadence.
+
+3. **Decision confidence is not ranking confidence.** A
+   tournament can have high confidence in the winner while
+   retaining substantial uncertainty in the ordering of
+   irrelevant lower-ranked candidates. If the decision target
+   is winner or top-k, do not continue sampling merely to
+   stabilize the entire ranking. The acquisition objective is
+   the decision, not the full posterior.
+
+4. **Bounded stopping.** Stopping rules must include:
+
+   ```
+   decision threshold
+   stability window
+   maximum budget
+   ```
+
+   For example, winner selection might stop when:
+
+   ```
+   P(best = i) > threshold
+   ```
+
+   and the selected winner remains stable across consecutive
+   batches. If the threshold is never reached because two
+   candidates are genuinely nearly indistinguishable, stop at
+   the declared budget and report the posterior uncertainty.
+   Do not manufacture certainty.
+
+### Architectural separation
+
+Use this conceptual decomposition:
+
+```
+judge | Davidson fitter | selector
+```
+
+These are separate responsibilities. The fitter consumes
+observations and estimates the Davidson posterior; it does not
+know why a pair was selected. The selector consumes posterior
+summaries and chooses which comparison to buy next; it does
+not own another ranking likelihood. The judge / protocol
+produces the observations and remains independent of inference
+and acquisition policy.
+
+Adaptive selection, if ever implemented, should be a thin
+separate module rather than logic embedded into `fit_btd`.
+The fitter does not grow a selector; the selector does not
+grow a likelihood.
+
+### Cost argument
+
+Round robin scales quadratically in the number of candidates.
+The way to reduce comparison cost at larger N is primarily
+to evaluate fewer, more informative pairs. A more expressive
+ranking model generally introduces additional parameters and
+does not itself reduce the number of observations required
+for arbitrary unrelated candidates.
+
+Feature-based preference models can reduce sample requirements
+only when candidates share a feature representation that
+allows generalization to unseen items. That is a different
+problem from ranking a finite set of unrelated candidates. Do
+not import the machinery of one into the other.
+
+### Frozen modeling layer (current use case)
+
+For the current small-N use case, the statistical modeling
+layer is frozen at:
+
+```
+direct counterbalanced W/L/T evidence
++ Bayesian Davidson
++ order effect
+```
+
+Do not introduce adaptive selection or richer ranking models
+until there is an actual scaling or model-misspecification
+problem demonstrated by data. If larger-N use becomes real,
+solve comparison allocation first before reconsidering the
+likelihood. The model-falsification audit in
+`experiments/model_falsification/MODEL_FALSIFICATION.md` is
+the standing evidence that the richer models considered so
+far do not earn their complexity at the project scale.
+
+---
+
+## 21. Optional large-N adaptive comparison design
+
+The small-N scaling boundary in §20 makes a clear claim: do
+not increase model complexity to solve an experimental-design
+problem. The corollary is that when the candidate set is too
+large for a complete round robin to be cheap, the right answer
+is to design the comparisons more carefully — not to swap
+the model.
+
+This section describes the optional large-N design path
+implemented in `pairwise_rank.design`. The design layer is
+opt-in. It does not modify `btd.py`, `protocol.py`, or any
+provider. The statistical model is the existing Bayesian
+Davidson. The design layer is a thin experimental-design
+layer on top.
+
+### Principle
+
+```
+likelihood pools evidence
+design buys evidence
+```
+
+The likelihood in `btd.py` is the only place latent strengths
+are estimated. The design layer in `design.py` decides which
+pairs to compare next and when to stop. The two layers are
+separable: the design layer is driven by the BTD posterior
+summaries and is meaningless without them, but the BTD
+likelihood is unchanged whether or not the design layer is
+used.
+
+### The optional large-N path
+
+```
+sparse connected bootstrap
+    -> Davidson posterior
+    -> decision-relevant frontier sampling
+    -> credible best set
+    -> stability / budget stop
+```
+
+Each step is a single purpose:
+
+1. **Sparse connected bootstrap**: a degree-6 shuffled
+   circulant graph gives every item roughly equal coverage
+   with `O(N * degree / 2)` unordered pairs instead of
+   `O(N^2)` for complete round robin. For N=1000, that is
+   ~3000 pairs instead of ~500000.
+
+2. **Davidson posterior**: the existing `fit_btd` is run on
+   the accumulated observations. The position-neutral
+   `p_best` and the position-neutral pairwise
+   `P(theta_i > theta_j)` are the two design summaries.
+
+3. **Decision-relevant frontier sampling**: an acquisition
+   heuristic scores every pair `(i, j)` in the exploration
+   pool by
+
+   ```
+   score(i, j) =
+       (P(best = i) + P(best = j))
+     * 4 P(theta_i > theta_j) (1 - P(theta_i > theta_j))
+   ```
+
+   The first factor is **relevance** (how much both items
+   matter to the top-K decision, since `P(best = i)` and
+   `P(best = j)` are mutually exclusive posterior events).
+   The second factor is **uncertainty** — the variance of
+   a Bernoulli random variable with parameter
+   `P(theta_i > theta_j)`, peaked at `0.5` and zero at
+   `{0, 1}`.
+
+   This is a transparent heuristic, not a theorem of
+   optimality. It is decision-focused: it spends calls on
+   pairs that are both relevant to the top-K decision AND
+   unresolved in relative strength. It explicitly avoids
+   the long-tail failure where `rank 700 vs rank 701`
+   receives calls merely because `P(theta_700 > theta_701)
+   \approx 0.5`.
+
+   The pool is the credible best set at the wider
+   confidence `1 - (1 - confidence) / 2` (i.e. 0.975 for
+   confidence 0.95). Items outside the pool stop receiving
+   new budget; they remain in the accumulated dataset and
+   can re-enter if the posterior shifts.
+
+4. **Credible best set**: the smallest prefix `S` of items
+   sorted by descending `p_best` whose cumulative mass is
+   at least `confidence`. `k = len(S)` is determined by
+   the posterior, not chosen by the caller. The set is
+   the credible set for the identity of the best
+   candidate, **not** a claim that these are the
+   top-`k` ranked candidates. If `P(best = i) \ge
+   confidence` for a single item, the credible set is
+   `{i}` and `k = 1` naturally.
+
+5. **Stability / budget stop**: stop when the credible
+   set has been the same for `stability_batches`
+   consecutive adaptive fits, or when the
+   `max_unordered_pairs` budget is reached, whichever
+   comes first. Set equality uses `frozenset` identity,
+   not display order. A budget stop returns the current
+   set even if unstable — confidence is never
+   fabricated.
+
+### Position invariance
+
+The design layer selects **unordered** pairs.
+`protocol.py` owns orientation. The acquisition score
+uses only position-neutral posterior quantities
+(`P(theta_i > theta_j)` and `P(best = i)`). The existing
+`beta_right` order effect remains an inference correction
+inside `btd.py`. The planner must not learn to exploit
+slot bias.
+
+### Ties
+
+No tie adapter. The 3-level `LEFT / TIE / RIGHT`
+likelihood already models ties. The planner consumes the
+position-neutral posterior after ties have been modeled.
+A planner that needed its own tie handling would imply
+the model layer is wrong; that is a different problem.
+
+### Small-N threshold (N <= 12)
+
+For `N <= 12`, complete round robin is cheap. The design
+layer is not the right tool: the bootstrap graph covers
+~12 * 6 / 2 = 36 unordered pairs, but complete round
+robin at N=12 is 66 pairs and is fit-friendly. The
+`N <= 12` threshold is an engineering constant, not a
+theorem — it reflects the point at which `O(N^2)`
+becomes more expensive than a few BTD refits under a
+sparse initial graph. The threshold is documented but
+not enforced inside `select_frontier_batch`; callers opt
+in to adaptive mode explicitly.
+
+### Computational complexity
+
+The bootstrap is `O(N * degree)` calls. The adaptive
+pair scoring is `O(M^2)` where `M` is the size of the
+exploration frontier, not necessarily `N`. At N=1000 a
+full `1000 * 1000` pairwise probability matrix is only
+~1e6 entries and is acceptable numerically, but the
+frontier `M` is typically much smaller than `N`.
+
+### N=1000 fitting check
+
+Pair selection scales to N=1000. The existing
+UNMODIFIED `fit_btd` does not. The benchmark in
+`experiments/design_validation/nuts_benchmark.py` records
+wall time at N=32, 100, 300, 1000. If `fit_btd` is
+impractical at N=1000, the simulation audit reports the
+limiting component honestly:
+
+```
+adaptive comparison DESIGN scales to N=1000;
+current full Bayesian FIT is the limiting component.
+```
+
+That is a separate decision, not a task of the design
+layer. Do not hide the bottleneck by silently
+introducing VI, MAP, Laplace, or another model. The
+principle in §20 still applies: solve comparison
+allocation before reconsidering the likelihood.
+
+### Empirical results
+
+See `experiments/design_validation/REPORT.md` for the
+audit comparing complete round robin, fixed degree-6
+sparse graph, and adaptive frontier design at N=32 (and
+N=100, 300 if computationally tractable in the sandbox).
+The headline correctness metric is COVERAGE: the
+fraction of repeated simulations in which the true best
+is inside the returned 95% credible set. The nominal
+target is approximately 0.95 if model and calibration
+assumptions hold.
+
+If the simulation audit reveals that:
+
+- the empirical 95% coverage is materially below 0.95
+- adaptive acquisition performs worse than fixed sparse
+  screening at the same coverage
+- the design complexity does not buy meaningful call
+  savings
+- `fit_btd` makes the large-N workflow operationally
+  useless
+
+the design layer is not the right tool. Stop and
+re-evaluate. Do not repair those failures by adding
+another model; that would violate §20.
+
+### Reference
+
+The module `pairwise_rank.design` exposes:
+
+```
+AdaptiveBestSetConfig
+AdaptiveBestSetState
+AdaptiveBestSetResult
+credible_best_set
+make_sparse_bootstrap
+select_frontier_batch
+should_stop_adaptive
+run_adaptive_best_set          (optional orchestrator)
+```
+
+The pure functions do not import PyMC. The orchestrator
+`run_adaptive_best_set` is the only place the design
+layer touches the sampler, and it is excluded from the
+default 5-batch test split (see `AGENTS.md` §7) because
+PyMC sampling dominates wall time.

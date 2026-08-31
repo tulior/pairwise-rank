@@ -8,9 +8,10 @@ deterministic 3-level judge, writes observations to JSONL, fits the
 default BTD model, and prints a summary. The judge here is a
 stand-in: replace it with your own callable for real use.
 
-This example uses the default 3-level verdict scale (LEFT, TIE,
-RIGHT). For the 5-level ordinal path see
-`examples/three_view.py` and the test_recovery.py test.
+This example uses the default 3-level verdict scale (LEFT, TIE, RIGHT).
+Legacy 5-level observations on disk load without migration;
+`fit_btd` and `direct_summary` collapse STRONG into ordinary wins
+and losses internally. No 5-level inference is performed.
 """
 from __future__ import annotations
 

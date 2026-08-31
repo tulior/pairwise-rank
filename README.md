@@ -7,27 +7,23 @@ The default protocol is the 3-level scale `LEFT, TIE, RIGHT`. The
 historical 5-level scale (`LEFT_STRONG, LEFT, TIE, RIGHT,
 RIGHT_STRONG`) is preserved for backward compatibility: legacy
 data on disk loads without migration, and `fit_btd` collapses
-`STRONG` outcomes into ordinary wins/losses automatically.
+`STRONG` outcomes into ordinary wins/losses automatically. No
+5-level inference is performed.
 
 ## Architecture
 
 ```
 direct_summary     baseline / always (no model, raw W/L/T + tournament score)
 fit_btd            default probabilistic model (3-level Bradley-Terry-Davidson)
-fit_ordinal        optional / legacy (5-level ordered logit)
-fit                DEPRECATED alias for fit_ordinal
 ```
 
-The default is BTD because the 5-level ordinal information is
-rarely used in practice: across many tournaments, STRONG
-verdicts occur in roughly 1-2% of non-ties, and BTD vs the
-ordered logit give `r_θ > 0.99` and `r_P(best) > 0.99`. The
-3-level protocol is simpler for the judge, has fewer tool-schema
-errors, and matches observed behavior more closely. Use
-`fit_ordinal` when the 5-level scale is materially populated and
-intensity is genuinely informative (see
-[EXPERIMENT_DESIGN.md](EXPERIMENT_DESIGN.md) for the inference
-policy).
+The supported methodology is BTD on 3-level verdicts. The 5-level
+ordinal information is rarely used in practice: across many
+tournaments, STRONG verdicts occur in roughly 1-2% of non-ties,
+and collapsing them to ordinary wins/losses loses almost no
+information. New code uses the 3-level protocol exclusively; legacy
+data with STRONG verdicts is accepted as input and collapsed
+automatically.
 
 ## Install
 
@@ -115,6 +111,16 @@ The package does not provide a default prompt, judge, or LLM tool
 schema. Those are the caller's job. The package owns the schedule,
 the verdict vocabulary, and the model. Nothing else.
 
+For convenience, the package ships a thin MiniMax connector under
+`pairwise_rank.providers` that implements the standard
+`JudgeConnector` protocol and assembles the Responses-API request
+body for the project's primary use case. It uses the provider's
+default sampling behavior (no `temperature`, no `top_p`) and
+explicitly requests the maximum supported reasoning effort for
+the configured model. It is an optional convenience, not a
+provider framework. See `AGENTS.md` §9–§10 for the policy and
+for how to add another provider.
+
 ### Optional: storing reasoning traces
 
 A `judge_fn` can return either a `Verdict` string or a
@@ -176,27 +182,6 @@ form `nu * (lambda_i + lambda_j) / 2`; Davidson uses the
 geometric-mean form. The two are statistically distinguishable on
 real data. We use Davidson.
 
-### Ordered logistic (optional / legacy, 5-level)
-
-```
-eta = theta_right - theta_left + beta_right
-theta ~ ZeroSumNormal(sigma = sigma_theta)        # sum-to-zero
-sigma_theta ~ HalfNormal(1.0)
-beta_right ~ Normal(0, 0.5)                       # right-slot position effect
-cutpoints: 3 positive gaps via softplus, then zero-centered
-y_obs ~ OrderedLogistic(eta, cutpoints)          # 0..4
-```
-
-- Verdict scale: 0 = `LEFT_STRONG`, 1 = `LEFT`, 2 = `TIE`, 3 = `RIGHT`, 4 = `RIGHT_STRONG`.
-- `P(left wins) = P(y in {0,1}) = sigmoid(c_1 - eta)` using the upper bound of the LEFT region.
-- `P(TIE) = P(y = 2) = sigmoid(c_2 - eta) - sigmoid(c_1 - eta)`.
-
-The BTD model collapses STRONG into ordinary wins/losses
-internally, so old 5-level data on disk is fit by BTD without
-migration. To run the 5-level ordered logit explicitly, use
-`fit_ordinal` and `run_tournament(..., verdict_levels=VERDICT_LEVELS_5)`.
-See `tests/test_recovery.py` for the 5-level recovery test.
-
 ## Results
 
 `summarize_btd(result, observations, position_neutral=False)` returns:
@@ -211,10 +196,11 @@ See `tests/test_recovery.py` for the 5-level recovery test.
 - `verdict_distribution_btd`: collapsed 3-level counts.
 - `divergences`, `max_rhat`, `min_ess_bulk`, `min_ess_tail`:
   sampler health from the post-warmup draws. `divergences` is the
-  number of divergent transitions across all chains; the other three
-  are arviz-computed convergence diagnostics over `theta`,
-  `sigma_theta`, `eta_tie`, `beta_right`. A healthy fit has
-  `max_rhat < 1.01` and ESS > ~400.
+  number of divergent transitions across all chains, or `None` if
+  the count could not be read; the other three are arviz-computed
+  convergence diagnostics over `theta`, `sigma_theta`, `eta_tie`,
+  `beta_right`. A healthy fit has `max_rhat < 1.01` and
+  ESS > ~400. A `None` divergence count is a red flag, not a pass.
 - `position_neutral`: whether `beta_right` was forced to zero in
   the predictions.
 
@@ -263,53 +249,20 @@ this unordered pair on average?".
 
 ## Diagnostics
 
-- `posterior_predictive_check(result, observations)`: a single
-  repeat-agreement PPC. If observed agreement is in the extreme
-  tail of the predictive distribution, the model is underpredicting
-  within-cell dependence. A single statistic does not establish
-  full calibration; use as one diagnostic, not a certificate.
 - Position bias: a non-zero `beta_right` with a 90% HDI excluding
   zero suggests the judge has a left or right slot preference.
   An HDI that includes zero does not prove there is no bias; it
   means the data is not powerful enough to detect one.
-- Sampler divergences are failures. Increase `target_accept`,
-  lengthen `tune`, or reparameterize. Increasing `K` does not fix
-  geometry.
+- Sampler divergences are failures. A `divergences` value of
+  `None` is also a failure -- it means the sampler backend did
+  not report a divergences field and the fit should be treated as
+  unverified for geometry. Increase `target_accept`, lengthen
+  `tune`, or reparameterize. Increasing `K` does not fix geometry.
 - TIE rate is diagnostic. A 50% TIE rate on a construct that
   should produce clear winners suggests the prompt is asking
   the model to hedge. A 0% TIE rate is a signal that the model
   is forced to vote. Neither extreme is itself a quality
   criterion.
-
-## Three-view report (direct + BTD + ordinal)
-
-For multi-candidate tournaments (≥5 items, ≥30 obs) the routine
-report pattern is to compare the three views:
-
-```python
-from pairwise_rank import three_view_report, print_three_view
-
-# include_ordinal=True (default) runs both BTD and the ordered logit.
-# Pass include_ordinal=False to skip the M0 fit (saves time when
-# STRONG is rare and the cross-check is not informative).
-report = three_view_report(observations, draws=2000, tune=2500, chains=4)
-print_three_view(report, label="my tournament")
-
-# report["top1"] = {"direct": ..., "btd": ..., "m0": ..., "all_three_agree": ...}
-# report["theta_corr_btd_m0"] = Pearson r between BTD and M0 theta means
-# report["pbest_corr_btd_m0"] = Pearson r between BTD and M0 P(best) values
-```
-
-Agreement between the views means the ranking is robust to the
-choice of global inference model. It does **not** establish that
-the underlying construct is appropriate — the construct is
-defined by the judge's prompt, not by the model. If the views
-disagree, the disagreement is diagnostic. In practice, the BTD
-vs ordered-logit correlation is > 0.99 on every tournament we
-have run; the cross-check is included as insurance, not because
-we expect disagreement. Head-to-heads (≤2 items) are not
-informative under either model; use `direct_summary` alone in
-that case.
 
 ## Head-to-head vs multi-candidate
 
@@ -321,6 +274,36 @@ characterize the comparison.
 
 For multi-candidate tournaments (≥5 items), use direct + BTD.
 Disagreement between the two is diagnostic, not a failure.
+
+## Provider connector (optional)
+
+`pairwise_rank.providers.MiniMax.MiniMaxJudge` is a thin
+stdlib-only connector for the MiniMax Responses API. It reads
+`$MINIMAX_API_KEY` (or `$M3_API_KEY` for backward compat) and
+returns a `Judgment` with provider / model / reasoning_effort
+metadata recorded for reproducibility.
+
+```python
+from pairwise_rank import run_tournament
+from pairwise_rank.providers import JudgmentRequest
+from pairwise_rank.providers.MiniMax import MiniMaxJudge
+
+judge = MiniMaxJudge()  # reads $MINIMAX_API_KEY
+def my_judge(left, right):
+    j = judge.judge(JudgmentRequest(
+        left=left, right=right,
+        instructions="<your construct prompt, verbatim>",
+    ))
+    return (j.verdict, j.reasoning)
+
+observations = run_tournament(candidates, my_judge, repeats=3)
+```
+
+The connector never sets `temperature`, `top_p`, `max_p`,
+`seed`, or any other sampling knob. It always sets
+`reasoning: {"effort": "high"}` to enable Adaptive Thinking
+for M3. The canonical internal judgment contract is fixed; the
+provider-specific parsing lives inside the connector module.
 
 ## See also
 

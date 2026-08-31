@@ -216,7 +216,7 @@ def test_reasoning_does_not_affect_fit(tmp_path):
     and without reasoning on the same verdicts must produce the same
     posterior draws (deterministic given the same seed)."""
     import numpy as np
-    from pairwise_rank import fit
+    from pairwise_rank import fit_btd
 
     base = [Observation(
         a="a", b="b", left="a", right="b", repeat=r, verdict="RIGHT",
@@ -226,12 +226,12 @@ def test_reasoning_does_not_affect_fit(tmp_path):
         for o in base
     ]
 
-    r1 = fit(base, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
-    r2 = fit(with_reasoning, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
+    r1 = fit_btd(base, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
+    r2 = fit_btd(with_reasoning, item_ids=["a", "b"], draws=200, tune=300, chains=2, seed=0)
     np.testing.assert_allclose(r1.theta_draws, r2.theta_draws, atol=1e-6)
     np.testing.assert_allclose(r1.beta_right_draws, r2.beta_right_draws, atol=1e-6)
-    np.testing.assert_allclose(r1.cutpoint_draws, r2.cutpoint_draws, atol=1e-6)
     np.testing.assert_allclose(r1.sigma_theta_draws, r2.sigma_theta_draws, atol=1e-6)
+    np.testing.assert_allclose(r1.eta_tie_draws, r2.eta_tie_draws, atol=1e-6)
 
 
 # 18. Default verdict scale is 3-level
@@ -299,31 +299,4 @@ def test_5level_data_on_disk_loads_fine():
     assert result.n == 2
 
 
-# 23. fit() emits DeprecationWarning (legacy 5-level alias)
-def test_fit_emits_deprecation_warning():
-    from pairwise_rank import fit, Observation
-    import warnings
-    obs = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="LEFT")]
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        fit(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
-    deprecation_warnings = [
-        x for x in w
-        if issubclass(x.category, DeprecationWarning)
-        and "fit is deprecated" in str(x.message)
-    ]
-    assert len(deprecation_warnings) >= 1
-
-
-# 24. fit_ordinal is the canonical name; fit() routes to it
-def test_fit_routes_to_fit_ordinal():
-    import warnings
-    from pairwise_rank import fit, fit_ordinal
-    obs = [Observation(a="a", b="b", left="a", right="b", repeat=1, verdict="LEFT")]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        r_legacy = fit(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
-        r_new = fit_ordinal(obs, item_ids=["a", "b"], draws=200, tune=300, chains=1, seed=0)
-    # Same draws, same seed, same obs -> same posterior
-    import numpy as np
-    np.testing.assert_allclose(r_legacy.theta_draws, r_new.theta_draws, atol=1e-6)
+# 23. M0 / fit_ordinal was removed; BTD is the only inference path.
